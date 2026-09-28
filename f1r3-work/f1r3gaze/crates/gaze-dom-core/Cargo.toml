@@ -1,0 +1,9 @@
+[package]
+name = "gaze-dom-core"
+description = "The F1R3Gaze DOM protocol engine over a DomBackend, plus an in-memory reference backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+k1ndl1ng-norm.workspace = true

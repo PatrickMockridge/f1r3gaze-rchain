@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/gaze-graded",
+  "crates/gaze-knf",
+  "crates/gaze-dom-core",
+  "crates/gaze-exec",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "Apache-2.0"
+authors = ["F1R3FLY.io"]
+
+[workspace.dependencies]
+# CampF1R3 at the gaze/k1g-apertures branch (upstream work packages U1, U3, U4, U6).
+# Switch to a git dependency pinned to a revision once the branch lands upstream.
+k1ndl1ng-parse = { path = "../campf1r3/crates/k1ndl1ng-parse" }
+k1ndl1ng-norm = { path = "../campf1r3/crates/k1ndl1ng-norm" }
+campf1r3-core = { path = "../campf1r3/crates/campf1r3-core" }
+k1ndl1ng-campf1r3 = { path = "../campf1r3/crates/k1ndl1ng-campf1r3" }
+b3ll0ws = { path = "../campf1r3/crates/b3ll0ws" }
+gaze-graded = { path = "crates/gaze-graded" }
+gaze-knf = { path = "crates/gaze-knf" }
+gaze-dom-core = { path = "crates/gaze-dom-core" }

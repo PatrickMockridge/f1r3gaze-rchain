@@ -1,0 +1,16 @@
+[package]
+name = "gaze-exec"
+description = "The F1R3Gaze tab executive: frame loop, apertures, meter, recorder and replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+k1ndl1ng-norm.workspace = true
+k1ndl1ng-parse.workspace = true
+campf1r3-core.workspace = true
+k1ndl1ng-campf1r3.workspace = true
+b3ll0ws.workspace = true
+gaze-graded.workspace = true
+gaze-knf.workspace = true
+gaze-dom-core.workspace = true

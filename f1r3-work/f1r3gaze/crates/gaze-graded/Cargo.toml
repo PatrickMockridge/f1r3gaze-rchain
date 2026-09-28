@@ -1,0 +1,6 @@
+[package]
+name = "gaze-graded"
+description = "Semirings and resolvers for graded where-clauses in F1R3Gaze pages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
