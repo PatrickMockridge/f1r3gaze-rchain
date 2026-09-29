@@ -58,6 +58,68 @@ impl DeployData {
         o
     }
 
+    /// Decode prepared contract bytes (a `DeployDataProto` without signer
+    /// fields), strictly: only the fields [`DeployData::signing_bytes`]
+    /// writes, each at most once, and the bytes must be exactly the canonical
+    /// encoding, so nothing can hide in what the wallet signs.
+    pub fn decode(b: &[u8]) -> Result<DeployData, String> {
+        fn var(b: &[u8], i: &mut usize) -> Result<u64, String> {
+            let mut v = 0u64;
+            for shift in (0..64).step_by(7) {
+                let x = *b.get(*i).ok_or("truncated varint")?;
+                *i += 1;
+                v |= ((x & 0x7f) as u64) << shift;
+                if x < 0x80 {
+                    return Ok(v);
+                }
+            }
+            Err("varint too long".into())
+        }
+        let mut d = DeployData {
+            term: String::new(),
+            timestamp: 0,
+            phlo_price: 0,
+            phlo_limit: 0,
+            valid_after_block_number: 0,
+            shard_id: String::new(),
+            expiration_timestamp: None,
+        };
+        let mut seen = 0u32;
+        let mut i = 0;
+        while i < b.len() {
+            let tag = var(b, &mut i)?;
+            let (n, wire) = ((tag >> 3) as u32, tag & 7);
+            if n >= 32 || seen & (1 << n) != 0 {
+                return Err(format!("field {n} repeated or out of range"));
+            }
+            seen |= 1 << n;
+            match (n, wire) {
+                (2 | 11, 2) => {
+                    let len = var(b, &mut i)? as usize;
+                    let end = i.checked_add(len).filter(|e| *e <= b.len()).ok_or("truncated field")?;
+                    let t = std::str::from_utf8(&b[i..end]).map_err(|_| "field is not UTF-8")?.to_string();
+                    i = end;
+                    if n == 2 { d.term = t } else { d.shard_id = t }
+                }
+                (3 | 7 | 8 | 10 | 13, 0) => {
+                    let v = var(b, &mut i)? as i64;
+                    match n {
+                        3 => d.timestamp = v,
+                        7 => d.phlo_price = v,
+                        8 => d.phlo_limit = v,
+                        10 => d.valid_after_block_number = v,
+                        _ => d.expiration_timestamp = Some(v),
+                    }
+                }
+                _ => return Err(format!("unexpected field {n} (wire type {wire}) in a prepared contract")),
+            }
+        }
+        if d.signing_bytes() != b {
+            return Err("prepared contract is not in canonical form".into());
+        }
+        Ok(d)
+    }
+
     pub fn signing_hash(&self) -> [u8; 32] {
         blake2b_256(&self.signing_bytes()).0
     }
@@ -82,6 +144,16 @@ pub fn sign(k: &SigningKey, data: DeployData) -> Result<SignedDeploy, String> {
         sig: sig.to_der().as_bytes().to_vec(),
         data,
     })
+}
+
+/// Sign prepared contract bytes as the Embers SDK's `signContract` does:
+/// Blake2b-256 of the bytes, secp256k1, low-S, DER. For a `DeployDataProto`
+/// encoding this is exactly the deploy signature the node checks.
+pub fn sign_bytes(k: &SigningKey, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let h = blake2b_256(bytes).0;
+    let sig: Signature = k.sign_prehash(&h).map_err(|e| e.to_string())?;
+    let sig = sig.normalize_s().unwrap_or(sig);
+    Ok(sig.to_der().as_bytes().to_vec())
 }
 
 /// The node's check, for tests and for the hostile-proxy harness.

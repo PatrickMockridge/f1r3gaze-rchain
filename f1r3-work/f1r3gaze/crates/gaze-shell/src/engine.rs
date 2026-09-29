@@ -7,7 +7,8 @@ use gaze_broker::{Broker, FileGrants, NAV, NET, Refusal, SHARD, STORE, ShardClas
 use gaze_dom_blitz::{Delivery, Services, WakeHandle};
 use gaze_exec::{CapRequest, Class};
 use gaze_net::{Http, NetError, Pool, Schemes, content_hash, fetch_reply, fetch_request, unhex};
-use gaze_shard::{Bridge, DriveSource, FileKeystore, Keystore, ShardOut, ShardService, SiteAddr, SiteManifest};
+use gaze_shard::{Bridge, DriveSource, FileKeystore, Keystore, Payer, ShardOut, ShardService, SiteAddr, SiteManifest};
+use gaze_wallet::{Embers, Limits, Wallets};
 use gaze_store::{OriginStore, path_for};
 use k1ndl1ng_norm::{Name, Node, Norm};
 use std::cell::RefCell;
@@ -25,6 +26,7 @@ pub struct Engine {
     pub schemes: Schemes,
     pub blobs: Arc<Blobs>,
     pub bridge: Arc<Bridge>,
+    pub wallets: Arc<Wallets>,
     pub broker: RefCell<Broker<FileGrants>>,
     pub sites: Arc<SiteCache>,
 }
@@ -78,7 +80,21 @@ impl Engine {
         };
         #[cfg(not(feature = "os-keyring"))]
         let keys: Arc<dyn Keystore> = Arc::new(FileKeystore::new(dir.join("keys")));
-        let bridge = Bridge::new(shard_cfg, http.clone(), pool.clone(), keys, Arc::clone(&blobs));
+        // The agent driving the browser pays: every deploy is signed by the
+        // active wallet, whose keys live in the keystore.
+        let embers = settings.embers_api.as_ref().map(|base| {
+            Embers::new(
+                base,
+                http.clone(),
+                Limits {
+                    shard_id: settings.shard.shard_id.clone(),
+                    max_fee: settings.max_fee,
+                },
+            )
+        });
+        let wallets = Arc::new(Wallets::open(dir.clone(), keys, embers));
+        let payer: Arc<dyn Payer> = wallets.clone();
+        let bridge = Bridge::new(shard_cfg, http.clone(), pool.clone(), payer, Arc::clone(&blobs));
         blobs.add_source(Arc::new(DriveSource {
             bridge: Arc::clone(&bridge),
             root: "/gaze-blob/".into(),
@@ -120,6 +136,7 @@ impl Engine {
             schemes,
             blobs,
             bridge,
+            wallets,
             broker,
             sites,
         })

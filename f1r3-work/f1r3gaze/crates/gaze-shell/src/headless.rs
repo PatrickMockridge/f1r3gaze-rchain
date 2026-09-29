@@ -17,6 +17,9 @@ pub struct Options {
     /// Selectors to click, in order, once the page has settled.
     pub clicks: Vec<String>,
     pub timeout: Duration,
+    /// Keep running at least this long (replies from the shard can take
+    /// seconds: a deploy answers once when sent and again when finalized).
+    pub wait: Duration,
 }
 
 #[derive(Debug)]
@@ -71,7 +74,7 @@ pub fn run(eng: Rc<Engine>, url: &str, opts: &Options) -> Report {
             Stage::Running => !busy,
             _ => false,
         };
-        if settled {
+        if settled && started.elapsed() >= opts.wait {
             let q = *quiet_since.get_or_insert_with(Instant::now);
             if q.elapsed() > Duration::from_millis(150) {
                 match clicks.next() {

@@ -84,7 +84,10 @@ fn bridge(observers: Vec<String>, validator: String, dir: &str) -> Arc<Bridge> {
         },
         Http::new(),
         Pool::new(2),
-        Arc::new(FileKeystore::new(d.join("keys"))),
+        Arc::new(KeyPayer {
+            key: k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap(),
+            address: "1111test".into(),
+        }),
         blobs,
     )
 }

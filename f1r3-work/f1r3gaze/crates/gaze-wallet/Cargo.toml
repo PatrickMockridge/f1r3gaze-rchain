@@ -1,0 +1,16 @@
+[package]
+name = "gaze-wallet"
+description = "F1R3Gaze wallet: F1R3Cap addresses, F1R3Sky-compatible key files, Embers transfers verified before signing, and the payer for every deploy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gaze-net.workspace = true
+gaze-shard.workspace = true
+k1ndl1ng-norm.workspace = true
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
+bs58 = "0.5"
+base64 = "0.22"
+serde_json = "1"

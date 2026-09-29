@@ -12,6 +12,7 @@ members = [
   "crates/gaze-store",
   "crates/gaze-blob",
   "crates/gaze-shard",
+  "crates/gaze-wallet",
   "crates/gaze-dom-blitz",
   "crates/gaze-shell",
   "crates/f1r3c",
@@ -28,6 +29,7 @@ default-members = [
   "crates/gaze-store",
   "crates/gaze-blob",
   "crates/gaze-shard",
+  "crates/gaze-wallet",
   "crates/gaze-dom-blitz",
   "crates/gaze-shell",
   "crates/f1r3c",
@@ -42,14 +44,15 @@ authors = ["F1R3FLY.io"]
 repository = "https://github.com/F1R3FLY-io/F1R3Gaze"
 
 [workspace.dependencies]
-# CampF1R3, branch gaze/k1g-apertures (upstream work packages U1, U3, U4, U6),
+# CampF1R3, branch gaze/map-remainders (upstream work packages U1, U3, U4, U6,
+# and remainder patterns for lists and maps),
 # pinned by revision as the specification requires. For local work on
 # CampF1R3 itself, override with a [patch] section pointing at a checkout.
-k1ndl1ng-parse = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
-k1ndl1ng-norm = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
-campf1r3-core = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
-k1ndl1ng-campf1r3 = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
-b3ll0ws = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
+k1ndl1ng-parse = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "ea2d32397390fba6304eb1d4c89ab6a9d9264737" }
+k1ndl1ng-norm = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "ea2d32397390fba6304eb1d4c89ab6a9d9264737" }
+campf1r3-core = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "ea2d32397390fba6304eb1d4c89ab6a9d9264737" }
+k1ndl1ng-campf1r3 = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "ea2d32397390fba6304eb1d4c89ab6a9d9264737" }
+b3ll0ws = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "ea2d32397390fba6304eb1d4c89ab6a9d9264737" }
 
 # Blitz at the specification's pin (0.3.0-beta.2, 674d7d2).
 blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "674d7d2144585baa0f7368b8ad76371c93fe1b65", default-features = false }
@@ -67,6 +70,7 @@ gaze-exec = { path = "crates/gaze-exec" }
 gaze-broker = { path = "crates/gaze-broker" }
 gaze-net = { path = "crates/gaze-net" }
 gaze-store = { path = "crates/gaze-store" }
+gaze-wallet = { path = "crates/gaze-wallet" }
 gaze-blob = { path = "crates/gaze-blob" }
 gaze-shard = { path = "crates/gaze-shard" }
 gaze-dom-blitz = { path = "crates/gaze-dom-blitz" }

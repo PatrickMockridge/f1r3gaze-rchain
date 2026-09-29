@@ -75,6 +75,10 @@ pub fn has_unforgeable(t: &Norm) -> bool {
             Node::New { body, .. } => procs.push(body.clone()),
             Node::Eval(n) => names.push(n.clone()),
             Node::Coll { items, .. } => procs.extend(items.iter().cloned()),
+            Node::CollRest { items, rest, .. } => {
+                procs.extend(items.iter().cloned());
+                procs.push(rest.clone());
+            }
             _ => {}
         }
     }

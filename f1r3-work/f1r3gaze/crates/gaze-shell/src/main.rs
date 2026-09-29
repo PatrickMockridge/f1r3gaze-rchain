@@ -3,9 +3,14 @@
 //! ```text
 //! f1r3gaze [URL]                     open a window
 //! f1r3gaze --headless URL [--allow] [--click SELECTOR]... [--timeout SECS]
-//!          [--log FILE.gzlog]        run a page without a window and print
+//!          [--wait SECS] [--log FILE.gzlog]
+//!                                    run a page without a window and print
 //!                                    its committed document and console
 //! f1r3gaze --profile DIR ...         use DIR as the profile
+//! f1r3gaze wallet list|new [LABEL]|import FILE [LABEL]|export ADDRESS [FILE]
+//!                 |use ADDRESS|remove ADDRESS|balance [ADDRESS]
+//!                 |send TO AMOUNT [DESCRIPTION]
+//!                                    manage the wallets that pay for deploys
 //! f1r3gaze --version
 //! ```
 
@@ -17,6 +22,67 @@ fn usage() -> ! {
         "usage: f1r3gaze [--profile DIR] [URL]\n       f1r3gaze [--profile DIR] --headless URL [--allow] [--click SELECTOR]... [--timeout SECS] [--log FILE]"
     );
     std::process::exit(2)
+}
+
+fn wallet(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
+    use gaze_wallet::Address;
+    let w = &eng.wallets;
+    let arg = |i: usize| args.get(i).map(String::as_str);
+    let need = |i: usize, what: &str| args.get(i).cloned().ok_or(format!("wallet {} needs {what}", args[0]));
+    let chosen = |i: usize| -> Result<Address, String> {
+        match arg(i) {
+            Some(a) => Address::parse(a),
+            None => w.active().ok_or_else(|| "no active wallet".to_string()),
+        }
+    };
+    match args.first().map(String::as_str).unwrap_or("list") {
+        "list" => {
+            for (e, active) in w.list() {
+                println!("{} {}  {}", if active { "*" } else { " " }, e.address, e.label);
+            }
+        }
+        "new" => println!("{}", w.create(arg(1).unwrap_or(""))?),
+        "import" => {
+            let f = need(1, "a wallet file")?;
+            let text = std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?;
+            println!("{}", w.import(&text, arg(2).unwrap_or(""))?);
+        }
+        "export" => {
+            let a = Address::parse(&need(1, "an address")?)?;
+            let body = w.export(&a)?;
+            match arg(2) {
+                Some(f) => {
+                    std::fs::write(f, &body).map_err(|e| format!("{f}: {e}"))?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o600));
+                    }
+                    println!("wrote {f}");
+                }
+                None => println!("{body}"),
+            }
+        }
+        "use" => w.set_active(&Address::parse(&need(1, "an address")?)?)?,
+        "remove" => w.remove(&Address::parse(&need(1, "an address")?)?)?,
+        "balance" => {
+            let a = chosen(1)?;
+            let s = w.state(&a)?;
+            println!("{a}  {}", s.balance);
+            for t in s.transfers.iter().rev().take(20) {
+                println!("  {}  {} -> {}  {}  {}", t.timestamp, t.from, t.to, t.amount, t.description.as_deref().unwrap_or(""));
+            }
+        }
+        "send" => {
+            let from = w.active().ok_or("no active wallet")?;
+            let to = Address::parse(&need(1, "a recipient")?)?;
+            let amount: i64 = need(2, "an amount")?.parse().map_err(|_| "the amount must be a whole number")?;
+            let id = w.transfer(&from, &to, amount, arg(3))?;
+            println!("deploy {id}");
+        }
+        other => return Err(format!("unknown wallet command {other}")),
+    }
+    Ok(())
 }
 
 fn main() {
@@ -39,6 +105,16 @@ fn main() {
             "--click" => opts.clicks.push(args.next().unwrap_or_else(|| usage())),
             "--timeout" => opts.timeout = Duration::from_secs(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
             "--log" => log = Some(args.next().unwrap_or_else(|| usage())),
+            "--wait" => opts.wait = Duration::from_secs(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
+            "wallet" => {
+                let rest: Vec<String> = args.by_ref().collect();
+                let eng = Engine::new(dir.clone());
+                if let Err(e) = wallet(&eng, &rest) {
+                    eprintln!("f1r3gaze: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             s if s.starts_with("--") => usage(),
             s => url = Some(s.to_string()),
         }

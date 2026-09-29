@@ -186,3 +186,51 @@ fn graded_and_guarded_pages_are_refused_until_their_work_packages_land() {
     k.manifest.ceiling = "sampled".into();
     assert!(matches!(TabExec::load(&k, MemDom::from_html(LAMP_HTML), [1; 32], &default_policy), Err(LoadError::Graded(_))));
 }
+
+/// A listener receives `(type, fields)`. The field map carries the guaranteed
+/// fields of its type and may carry more (docs/events.md). A listener written
+/// with a remainder names what it uses and keeps working when a host adds
+/// fields; an exact pattern stops matching.
+#[test]
+fn remainder_patterns_survive_extra_event_fields() {
+    let src = r##"new found, sub, clicks in {
+      doc!("query1", "#lamp", *found) |
+      for (@("ok", *lamp) <- found) {
+        lamp!("listen", "click", *clicks, {}, *sub) |
+        for (@(_, {"target": *t, "x": x ..._}) <= clicks) { t!("setAttr", "data-x", "seen") | log!("info", x) }
+      }
+    }"##;
+    let exact = r##"new found, sub, clicks in {
+      doc!("query1", "#lamp", *found) |
+      for (@("ok", *lamp) <- found) {
+        lamp!("listen", "click", *clicks, {}, *sub) |
+        for (@(_, {"target": *t, "type": _, "x": x, "y": _, "button": _, "mods": _}) <= clicks) { log!("info", x) }
+      }
+    }"##;
+    let click = |extra: bool| {
+        let mut f = vec![
+            ("x".to_string(), Norm::int(7)),
+            ("y".to_string(), Norm::int(9)),
+            ("button".to_string(), Norm::int(0)),
+            ("mods".to_string(), Norm::list(vec![])),
+        ];
+        if extra {
+            f.push(("pointerType".to_string(), Norm::str("mouse")));
+        }
+        f
+    };
+    for (page, extra, expect) in [(src, false, 1), (src, true, 1), (exact, false, 1), (exact, true, 0)] {
+        let k = Knf::from_source(page, Level::K1G, &[]).expect("compiles");
+        let mut tab = TabExec::load(&k, MemDom::from_html(LAMP_HTML), [3; 32], &default_policy).unwrap();
+        let mut t = 0;
+        run_until_quiet(&mut tab, &mut t);
+        let lamp = tab.dom.backend.by_id("lamp").unwrap();
+        tab.dispatch(lamp, "click", click(extra));
+        run_until_quiet(&mut tab, &mut t);
+        assert_eq!(tab.console.len(), expect, "extra fields: {extra}, pattern: {}", if page == src { "remainder" } else { "exact" });
+        if page == src {
+            assert_eq!(tab.console[0].1, "7");
+            assert!(tab.dom.backend.serialize().contains(r#"data-x="seen""#));
+        }
+    }
+}

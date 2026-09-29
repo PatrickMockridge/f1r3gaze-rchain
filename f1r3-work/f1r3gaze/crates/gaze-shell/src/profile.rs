@@ -29,6 +29,11 @@ pub struct Settings {
     pub store_quota: u64,
     /// Refuse plain-HTTP top-level documents.
     pub https_only: bool,
+    /// The Embers service for wallet balances, history and transfers (the
+    /// one F1R3Sky uses). Deploys go to the node directly either way.
+    pub embers_api: Option<String>,
+    /// Upper bound on a transfer contract's `phlo_price × phlo_limit`.
+    pub max_fee: i64,
 }
 
 impl Default for Settings {
@@ -40,6 +45,8 @@ impl Default for Settings {
             cache_bytes: 512 * 1024 * 1024,
             store_quota: gaze_broker::DEFAULT_STORE_QUOTA,
             https_only: false,
+            embers_api: None,
+            max_fee: 10_000_000,
         }
     }
 }
@@ -52,6 +59,9 @@ pub const TEMPLATE: &str = "# F1R3Gaze settings. Lists are comma-separated.
 # quorum = 2
 # mirrors = https://cdn.example/blob/
 # https_only = false
+# Wallet balances, history and transfers (the Embers service F1R3Sky uses):
+# embers_api = https://embers.example
+# max_fee = 10000000
 ";
 
 impl Settings {
@@ -76,6 +86,8 @@ impl Settings {
                 "cache_bytes" => s.cache_bytes = v.parse().unwrap_or(s.cache_bytes),
                 "store_quota" => s.store_quota = v.parse().unwrap_or(s.store_quota),
                 "https_only" => s.https_only = v == "true",
+                "embers_api" => s.embers_api = Some(v.to_string()).filter(|v| !v.is_empty()),
+                "max_fee" => s.max_fee = v.parse().unwrap_or(s.max_fee),
                 _ => {}
             }
         }

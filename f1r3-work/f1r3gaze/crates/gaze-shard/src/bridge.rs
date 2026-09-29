@@ -2,7 +2,7 @@
 
 use crate::deploy::{DeployData, SignedDeploy, public_key, sign};
 use crate::expr::to_norm;
-use crate::keys::{Keystore, fresh_key};
+use crate::keys::fresh_key;
 use crate::node::Node;
 use crate::site::{SiteAddr, SiteManifest};
 use crate::term::render;
@@ -126,12 +126,38 @@ impl EventHub {
     }
 }
 
+/// Who pays for work on the node. On this protocol the account charged for a
+/// deploy is its deployer, so the payer's key signs every deploy the browser
+/// makes; what a deploy may do with that identity is limited by the terms the
+/// bridge renders (see [`crate::term`]: no `rho:rchain:deployerId`).
+pub trait Payer: Send + Sync + 'static {
+    /// The signing key and its account address.
+    fn payer(&self) -> Result<(SigningKey, String), String>;
+    /// The account's balance, if known, for the consent prompt.
+    fn balance(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// A fixed key: for tests and for scripted agents that bring their own key.
+pub struct KeyPayer {
+    pub key: SigningKey,
+    pub address: String,
+}
+
+impl Payer for KeyPayer {
+    fn payer(&self) -> Result<(SigningKey, String), String> {
+        Ok((self.key.clone(), self.address.clone()))
+    }
+}
+
 /// Shared by every tab of a profile.
 pub struct Bridge {
     pub cfg: ShardConfig,
     pub http: Http,
     pub pool: Pool,
-    pub keys: Arc<dyn Keystore>,
+    /// Who pays: the key that signs every deploy, and its account.
+    pub payer: Arc<dyn Payer>,
     pub blobs: Arc<Blobs>,
     /// Highest finalized block at which each binding was seen (freshness).
     seen: Mutex<BTreeMap<String, i64>>,
@@ -139,13 +165,13 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn new(cfg: ShardConfig, http: Http, pool: Pool, keys: Arc<dyn Keystore>, blobs: Arc<Blobs>) -> Arc<Bridge> {
+    pub fn new(cfg: ShardConfig, http: Http, pool: Pool, payer: Arc<dyn Payer>, blobs: Arc<Blobs>) -> Arc<Bridge> {
         let events = cfg.observers.first().map(|o| EventHub::start(Node::new(o, http.clone()).events_url()));
         Arc::new(Bridge {
             cfg,
             http,
             pool,
-            keys,
+            payer,
             blobs,
             seen: Mutex::new(BTreeMap::new()),
             events,
@@ -437,20 +463,22 @@ impl ShardService {
                 let ret2 = args.last().and_then(as_name);
                 // Quote the cost first; the deploy itself waits for the user.
                 self.job(move |b| {
-                    let r = b.keys.site_key(&b.cfg.user, &site).and_then(|k| {
+                    let r = b.payer.payer().and_then(|(k, addr)| {
                         let term = b.render_by_hash(&h, &pargs)?;
                         let cost = b.estimate(&term, &k)?;
-                        Ok((term, cost))
+                        Ok((term, cost, addr))
                     });
                     match r {
-                        Ok((term, cost)) => {
+                        Ok((term, cost, addr)) => {
+                            let bal = b.payer.balance().map(|v| format!(" (balance {v})")).unwrap_or_default();
                             if let Ok(mut s) = sh.lock() {
                                 s.prompts.push((
                                     Prompt {
                                         id,
                                         text: format!(
-                                            "{site} wants to deploy program {} to the shard, signed with this site's key. Estimated cost: {cost} phlo.",
-                                            &hex(&h)[..12]
+                                            "{site} wants to deploy program {} to the shard. Estimated cost: {cost} phlo, paid from your wallet {}{bal}.",
+                                            &hex(&h)[..12],
+                                            short(&addr)
                                         ),
                                     },
                                     Pending::Deploy { term, cost, ret: ret2 },
@@ -506,8 +534,10 @@ impl ShardService {
         }
     }
 
-    /// A send on a session name becomes a deploy signed by the session key,
-    /// delivered to the service as `svc!("msg", pubkey, args...)`.
+    /// A send on a session name becomes a deploy, paid for by the wallet and
+    /// delivered to the service as `svc!("msg", session, args...)`, where
+    /// `session` is the session key's public key (it identifies the session;
+    /// the wallet signs).
     fn session_send(&mut self, label: &str, args: &[Norm]) {
         let s = match self.shared.lock() {
             Ok(g) => g.sessions.get(label).map(|s| (s.key.clone(), s.uri.clone())),
@@ -528,7 +558,7 @@ impl ShardService {
                 if shown.is_empty() { "" } else { ", " },
                 shown.join(", ")
             );
-            let r = b.sign_and_deploy(&key, &term, 250_000);
+            let r = b.payer.payer().and_then(|(pk, _)| b.sign_and_deploy(&pk, &term, 250_000));
             ret.map(|chan| ShardOut::Reply {
                 chan,
                 datum: match r {
@@ -602,7 +632,8 @@ impl ShardService {
                 let (sh, w) = (Arc::clone(&self.shared), Arc::clone(&self.wake));
                 self.job(move |b| {
                     let limit = (cost as i64).saturating_mul(3) / 2 + 10_000;
-                    let d = match b.keys.site_key(&b.cfg.user, &site).and_then(|k| b.sign_and_deploy(&k, &term, limit)) {
+                    let _ = &site;
+                    let d = match b.payer.payer().and_then(|(k, _)| b.sign_and_deploy(&k, &term, limit)) {
                         Ok(d) => d,
                         Err(e) => return ret.map(|chan| ShardOut::Reply { chan, datum: err3("shard", &e) }),
                     };
@@ -649,7 +680,8 @@ impl ShardService {
                             "new lookup(`rho:registry:lookup`), ch in {{ lookup!(`{uri}`, *ch) | for (svc <- ch) {{ svc!(\"open\", \"{}\") }} }}",
                             hex(&public_key(&key))
                         );
-                        b.sign_and_deploy(&key, &term, 250_000)?;
+                        let (pk, _) = b.payer.payer()?;
+                        b.sign_and_deploy(&pk, &term, 250_000)?;
                         Ok(key)
                     });
                     let chan = ret?;
@@ -743,5 +775,14 @@ impl BlobSource for DriveSource {
             out.extend(bytes_of(&c).ok_or("chunk is not bytes")?);
         }
         Ok(Some(out))
+    }
+}
+
+/// `1111abcd…wxyz` for prompts.
+pub fn short(addr: &str) -> String {
+    if addr.len() <= 14 {
+        addr.to_string()
+    } else {
+        format!("{}…{}", &addr[..8], &addr[addr.len() - 6..])
     }
 }

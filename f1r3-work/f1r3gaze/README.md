@@ -17,10 +17,12 @@ signed installers of P4, and the reach tier.
 
 ```
 f1r3gaze [URL]                      open a window (default: gaze://newtab)
-f1r3gaze --headless URL [--allow] [--click SELECTOR]... [--timeout SECS] [--log FILE.gzlog]
+f1r3gaze --headless URL [--allow] [--click SELECTOR]... [--timeout SECS] [--wait SECS] [--log FILE.gzlog]
                                     run a page without a window; print its committed
                                     document and console (CI smoke tests)
 f1r3gaze --profile DIR ...          use DIR as the profile (also: F1R3GAZE_PROFILE)
+f1r3gaze wallet new|import|export|use|list|balance|send|remove ...
+                                    the wallets that pay for deploys (docs/wallet.md)
 
 f1r3c compile app.rho [-o app.knf] [--level k1g] [--import IDENT=URN]...
 f1r3c inspect app.knf               manifest, hashes, program text
@@ -55,7 +57,31 @@ built-in `gaze://newtab` and `gaze://about`.
 Settings live in `settings.conf` in the profile directory
 (`~/Library/Application Support/F1R3Gaze`, `%APPDATA%\F1R3Gaze`,
 `$XDG_DATA_HOME/f1r3gaze`): shard observers, the validator, the shard id,
-the quorum, blob mirrors, `https_only`.
+the quorum, blob mirrors, `https_only`, and for the wallet `embers_api` and
+`max_fee`.
+
+### The wallet: the agent driving the browser pays
+
+Every deploy the browser makes (a page's program, a session message) is
+signed by the **active wallet**, whose account pays for it. Wallets are
+created, imported and exported in the same file format as **F1R3Sky**, and
+their addresses are the F1R3Cap addresses F1R3Sky shows. Keys live in the OS
+keychain (macOS, Windows) or a `0600` file per key (Linux).
+
+A program deployed under the user's key could otherwise take the deployer's
+identity and spend from the wallet, so the browser renders every deploy
+itself and binds only allow-listed system names: registry, standard output,
+the deploy id, block data, crypto. **`rho:rchain:deployerId` is refused.** A
+page can cost phlo (the consent prompt quotes it, with the paying wallet and
+its balance); it cannot move funds. Transfers go through Embers, as in
+F1R3Sky, but the browser decodes and checks every prepared contract against
+Embers' transfer template before signing it. Details: `docs/wallet.md`.
+
+### Events
+
+A listener receives `(type, fields)`. `docs/events.md` lists the fields
+guaranteed for each event type; hosts may add more, so pages end their
+patterns with a remainder: `@(_, {"x": x, "y": y ..._})`.
 
 ## Building
 
@@ -65,8 +91,9 @@ cargo test --workspace
 cargo build -p gaze-reach --target wasm32-unknown-unknown --profile reach
 ```
 
-Rust 1.91, edition 2024. CampF1R3 (`gaze/k1g-apertures`, rev `c4e9271`) and
-Blitz (rev `674d7d2`) are git dependencies pinned by revision. On Linux the
+Rust 1.91, edition 2024. CampF1R3 (`gaze/map-remainders`, rev `ea2d323`) and
+Blitz (rev `674d7d2`) are git dependencies pinned by revision; the CampF1R3
+revision must be pushed to GitHub before a clean checkout can build. On Linux the
 window needs Vulkan (or Mesa's `lavapipe`, `mesa-vulkan-drivers`) and
 `libxkbcommon`; macOS and Windows need nothing extra. Building the windowed
 binary in debug mode wants about 4 GB of memory to link.
@@ -119,7 +146,8 @@ demo page to GitHub Pages. A page opts in with
 | `gaze-net` | §8.5 | HTTP without ambient credentials, per-hop redirect checks, schemes, content hashes, the Blitz net provider |
 | `gaze-store` | §8.6 | per-origin append-only store with quota and torn-tail recovery |
 | `gaze-blob` | §9.7 | content-addressed blobs: verifying cache, mirrors |
-| `gaze-shard` | §9, WP S1/S2 | the shard bridge: signed deploys, node client, graded answers (node, quorum), freshness, code-by-hash rendering, sessions, watches, site manifests, on-chain blobs in F1R3Drive's layout |
+| `gaze-shard` | §9, WP S1/S2 | the shard bridge: deploys signed by the payer, node client, graded answers (node, quorum), freshness, code-by-hash rendering with the system-name allow-list, sessions, watches, site manifests, on-chain blobs in F1R3Drive's layout, the keystore |
+| `gaze-wallet` | — | wallets: F1R3Cap addresses, F1R3Sky-compatible key files, Embers balances and transfers with prepared contracts checked before signing; the bridge's payer |
 | `gaze-shell` | §3, WP C1 | the application: engine, tab pipeline, chrome, headless runner, profile |
 | `f1r3c` | §3 | the toolchain CLI |
 | `gaze-reach` | §12 | the reach tier |
@@ -135,6 +163,10 @@ demo page to GitHub Pages. A page opts in with
 - **U6** the `Keyed` minter.
 - A job whose cut an observer refuses is put back at the head of the queue,
   so an exhausted budget stops progress without losing work.
+- **Remainder patterns** for lists and maps (branch `gaze/map-remainders`,
+  commit `ea2d323`, offered as input to the map-pattern design):
+  `[a, b ...rest]`, `{"k": v ...rest}`. A map pattern matches by key lookup;
+  keys must be ground. See the commit message for the full design.
 
 Three defects in the existing code were found and fixed on the way:
 
@@ -148,16 +180,17 @@ Three defects in the existing code were found and fixed on the way:
 
 ## Tests
 
-61 tests in this workspace, all passing (CampF1R3 carries its own 181):
+67 tests in this workspace, all passing (CampF1R3 carries its own 181):
 
 | crate | tests | what they establish |
 | --- | --- | --- |
-| `gaze-exec` | 8 | the specification's lamp; replay with identical commit hashes; seeds; dead channels; confinement; timers; bounded runaway pages |
+| `gaze-exec` | 9 | the specification's lamp; replay with identical commit hashes; seeds; dead channels; confinement; timers; bounded runaway pages; a remainder listener survives extra event fields where an exact one goes silent |
 | `gaze-dom-core`, `gaze-graded`, `gaze-knf` | 16 | the protocol engine, the semirings, the container |
 | `gaze-dom-blitz` | 7 | Blitz and `MemDom` commit identical hashes frame by frame; a Blitz log replays identically on both, including a click on a never-named node; scoped queries cannot leak; `decide` prevents; `setHTML` |
 | `gaze-broker` | 5 | policy, prompts, remembered grants, routes, revocation |
 | `gaze-net`, `gaze-store`, `gaze-blob` | 10 | redirects, credentials stripped, hashes; torn-tail recovery and quota; verified cache |
 | `gaze-shard` | 11 | the deploy preimage matches `prost`; signatures verify; against mock nodes: a lying observer is outvoted, a split is an error, a rollback is stale, nothing is deployed before consent, and the body the validator receives verifies |
+| `gaze-wallet` | 5 | addresses, wallet files and signature bytes identical to the Embers SDK's own output; the contract check refuses a changed recipient, amount or note, smuggled code, hidden fields, a high fee or another shard; wallets kept, exported, switched; transfers through an honest mock Embers, and nothing signed for a dishonest one |
 | `gaze-reach` | 3 | the reach tier commits exactly the native executive's hashes for the same page and clicks; integrity; `shard` is dead |
 | `gaze-shell` | 1 | settings |
 
@@ -170,6 +203,13 @@ End-to-end, on the real binary:
 - in the window (Linux, Xvfb, Vello on lavapipe): tabs, the address bar with
   typed navigation, the console and grants panels, and a real click handled
   by the page — screenshots in `docs/screenshots/`;
+- the wallet, through the whole stack against a mock node: a page's deploy is
+  quoted naming the paying wallet, signed by it, and finalized; a program
+  asking for `rho:rchain:deployerId` is refused before anything reaches the
+  node; a wallet file in F1R3Sky's format imports and exports byte for byte;
+- in the window: the wallet panel lists wallets with balances from Embers,
+  switches the paying wallet, and sends a transfer after a confirming click
+  (screenshots 06–08);
 - the `.deb` installs and runs, the AppImage runs, and the signed checksums
   verify (and fail on a changed byte).
 
@@ -196,6 +236,10 @@ End-to-end, on the real binary:
   byte-for-byte what the node verifies.
 - **Linux keys** are in a `0600` file in the profile; macOS and Windows use
   the OS keychain (`os-keyring`, on in release builds).
+- **One wallet signs for every site** (the spec's per-site keys are gone:
+  the account that pays is the deployer). Sites can therefore link a user's
+  deploys; users who want separate identities keep several wallets. Session
+  keys remain as session identities but no longer sign.
 
 ## Not in this release
 
@@ -206,5 +250,7 @@ End-to-end, on the real binary:
 - `rho:serve` resolution depends on the VersionedRegistry step 6 on the node.
 - Legacy JavaScript tabs, devtools time travel, the gateway.
 - Opening `f1r3://` links from other macOS apps (Apple-event URL handling).
-- Map patterns with rest fields: an event pattern must list every field the
-  event carries.
+- Authenticating session messages to their service (a signed-message
+  scheme verified on chain); today a session is identified, not proven.
+- A `pay` capability for pages (a payment request the user approves in the
+  wallet); pages cannot initiate transfers.

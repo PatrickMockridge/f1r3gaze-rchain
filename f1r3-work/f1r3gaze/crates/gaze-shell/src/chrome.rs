@@ -34,6 +34,14 @@ body{display:flex;flex-direction:column}
 .hidden{display:none}
 #panel{flex:none;max-height:40%;overflow:auto;border-top:1px solid #d0d5dd;background:#fafbfc;padding:6px 10px;font:12px ui-monospace,Menlo,monospace}
 #panel:empty{display:none}
+#wallet{flex:none;max-height:45%;overflow:auto;border-top:1px solid #d0d5dd;background:#fafbfc;padding:8px 10px}
+#wallet .row{display:flex;gap:6px;align-items:center;margin:4px 0}
+#wallet input{font:inherit;padding:4px 6px;border:1px solid #c0c6d0;border-radius:5px}
+#wallet button{font:inherit;padding:3px 9px;border:1px solid #c0c6d0;border-radius:5px;background:#fff}
+#wallet .addr{font:12px ui-monospace,Menlo,monospace}
+#wallet .active{font-weight:600}
+#walletmsg{color:#445;margin-top:4px}
+.muted{color:#667085}
 #status{flex:none;padding:3px 10px;background:#f0f2f5;border-top:1px solid #d0d5dd;color:#556;font-size:12px;display:flex;gap:10px}
 #status button{font:inherit;padding:0 6px}
 .warn{color:#8a4b00}
@@ -44,11 +52,21 @@ const SHELL: &str = r#"<html><head><title>F1R3Gaze</title><style>__CSS__</style>
 <div id="toolbar">
 <button data-action="back" title="Back">&lt;</button><button data-action="fwd" title="Forward">&gt;</button><button data-action="reload" title="Reload">Reload</button>
 <input id="url" type="text" value=""><button data-action="go">Go</button>
-<button data-action="panel:grants">Grants</button><button data-action="panel:console">Console</button>
+<button data-action="panel:grants">Grants</button><button data-action="panel:console">Console</button><button data-action="panel:wallet">Wallet</button>
 </div>
 <div id="prompt"></div>
 <div id="main"></div>
 <div id="panel"></div>
+<div id="wallet" class="hidden">
+<div id="walletlist"></div>
+<div class="row"><button data-action="wallet:new">New wallet</button>
+<span class="muted">or paste a wallet file (from F1R3Sky) or hex key:</span>
+<input id="wallet-import" type="text" style="flex:1"><button data-action="wallet:import">Import</button></div>
+<div class="row"><b>Send</b> <span class="muted">to</span> <input id="wallet-to" type="text" style="flex:2">
+<span class="muted">amount</span> <input id="wallet-amount" type="text" style="width:80px">
+<span class="muted">note</span> <input id="wallet-desc" type="text" style="flex:1"><button data-action="wallet:send">Send…</button></div>
+<div id="walletmsg"></div>
+</div>
 <div id="status"></div>
 </body></html>"#;
 
@@ -67,6 +85,7 @@ enum Action {
     Panel(String),
     LetItRun,
     SaveLog,
+    Wallet(String),
     FocusUrl,
 }
 
@@ -91,6 +110,7 @@ impl Action {
             "panel" => Action::Panel(rest.to_string()),
             "letitrun" => Action::LetItRun,
             "savelog" => Action::SaveLog,
+            "wallet" => Action::Wallet(rest.to_string()),
             _ => return None,
         })
     }
@@ -161,6 +181,17 @@ pub struct ChromeDocument {
     url_dirty: bool,
     title: String,
     saved: Option<String>,
+    wallet: std::sync::Arc<std::sync::Mutex<WalletView>>,
+}
+
+/// What the wallet panel shows; filled by background work.
+#[derive(Default)]
+struct WalletView {
+    balances: BTreeMap<String, String>,
+    message: String,
+    /// A send or a removal waiting for its confirming click.
+    confirm: Option<(String, String)>,
+    pending_send: Option<(String, i64, Option<String>)>,
 }
 
 fn qn(k: &str) -> QualName {
@@ -185,6 +216,7 @@ impl ChromeDocument {
             url_dirty: true,
             title: String::new(),
             saved: None,
+            wallet: Default::default(),
         };
         c.open_tab(url);
         c
@@ -298,7 +330,13 @@ impl ChromeDocument {
                     self.tabs[i].0.revoke(&urn, r);
                 }
             }
-            Action::Panel(p) => self.panel = if self.panel == p { String::new() } else { p },
+            Action::Panel(p) => {
+                self.panel = if self.panel == p { String::new() } else { p };
+                if self.panel == "wallet" {
+                    self.refresh_balances();
+                }
+            }
+            Action::Wallet(w) => self.wallet_action(&w),
             Action::LetItRun => {
                 let view = self.tabs[i].1;
                 if let Some(r) = rho_mut(&mut self.inner, view) {
@@ -324,6 +362,201 @@ impl ChromeDocument {
             }
         }
         self.wake.wake();
+    }
+
+    fn input_value(&self, id: &str) -> String {
+        self.id(id)
+            .and_then(|n| self.inner.get_node(n))
+            .and_then(|n| n.element_data())
+            .and_then(|e| e.text_input_data())
+            .map(|t| t.editor.raw_text().trim().to_string())
+            .unwrap_or_default()
+    }
+
+    fn clear_input(&mut self, id: &str) {
+        if let Some(n) = self.id(id) {
+            let mut m = self.inner.mutate();
+            m.set_attribute(n, qn("value"), "");
+        }
+    }
+
+    fn say(&self, msg: impl Into<String>) {
+        if let Ok(mut v) = self.wallet.lock() {
+            v.message = msg.into();
+        }
+    }
+
+    fn refresh_balances(&self) {
+        if self.eng.wallets.embers.is_none() {
+            self.say("Balances and transfers need an Embers service: set embers_api in settings.conf.");
+            return;
+        }
+        let (w, view, wake) = (self.eng.wallets.clone(), self.wallet.clone(), self.wake.clone());
+        self.eng.pool.spawn(move || {
+            for (e, _) in w.list() {
+                let b = match w.state(&e.address) {
+                    Ok(s) => s.balance.to_string(),
+                    Err(_) => "?".into(),
+                };
+                if let Ok(mut v) = view.lock() {
+                    v.balances.insert(e.address.as_str().to_string(), b);
+                }
+            }
+            wake.wake();
+        });
+    }
+
+    fn wallet_action(&mut self, w: &str) {
+        use gaze_wallet::Address;
+        let (verb, arg) = w.split_once(':').unwrap_or((w, ""));
+        let wallets = self.eng.wallets.clone();
+        match verb {
+            "new" => match wallets.create("") {
+                Ok(a) => self.say(format!("Created {a}. Export it (and keep the file safe) before funding it.")),
+                Err(e) => self.say(e),
+            },
+            "import" => {
+                let text = self.input_value("wallet-import");
+                match wallets.import(&text, "imported") {
+                    Ok(a) => {
+                        self.clear_input("wallet-import");
+                        self.say(format!("Imported {a}."));
+                    }
+                    Err(e) => self.say(format!("Could not import: {e}")),
+                }
+            }
+            "use" => match Address::parse(arg).and_then(|a| wallets.set_active(&a)) {
+                Ok(()) => self.say("This wallet now pays for deploys."),
+                Err(e) => self.say(e),
+            },
+            "export" => {
+                let r = Address::parse(arg).and_then(|a| {
+                    let body = wallets.export(&a)?;
+                    let dir = self.eng.dir.join("exports");
+                    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                    let p = dir.join(format!("{a}.json"));
+                    std::fs::write(&p, body).map_err(|e| e.to_string())?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                    }
+                    Ok(p)
+                });
+                match r {
+                    Ok(p) => self.say(format!("Wallet file written to {} (F1R3Sky can import it).", p.display())),
+                    Err(e) => self.say(e),
+                }
+            }
+            "remove" => {
+                if let Ok(mut v) = self.wallet.lock() {
+                    v.confirm = Some(("remove".into(), arg.to_string()));
+                    v.message = format!("Remove {arg}? Its key will be deleted. Export it first if it holds funds.");
+                }
+            }
+            "send" => {
+                let to = self.input_value("wallet-to");
+                let amount = self.input_value("wallet-amount");
+                let desc = self.input_value("wallet-desc");
+                let parsed = Address::parse(&to).and_then(|t| {
+                    let n: i64 = amount.parse().map_err(|_| "the amount must be a whole number".to_string())?;
+                    if n <= 0 {
+                        return Err("the amount must be positive".into());
+                    }
+                    Ok((t, n))
+                });
+                match (parsed, wallets.active()) {
+                    (Ok((t, n)), Some(from)) => {
+                        if let Ok(mut v) = self.wallet.lock() {
+                            v.pending_send = Some((t.as_str().to_string(), n, Some(desc).filter(|d| !d.is_empty())));
+                            v.confirm = Some(("send".into(), String::new()));
+                            v.message = format!("Send {n} from {} to {t}?", gaze_shard::bridge::short(from.as_str()));
+                        }
+                    }
+                    (Err(e), _) => self.say(e),
+                    (_, None) => self.say("No wallet to send from."),
+                }
+            }
+            "confirm" => {
+                let c = self.wallet.lock().ok().and_then(|mut v| v.confirm.take());
+                match c {
+                    Some((kind, a)) if kind == "remove" => match Address::parse(&a).and_then(|a| wallets.remove(&a)) {
+                        Ok(()) => self.say("Removed."),
+                        Err(e) => self.say(e),
+                    },
+                    Some((kind, _)) if kind == "send" => {
+                        let p = self.wallet.lock().ok().and_then(|mut v| v.pending_send.take());
+                        let (Some((to, n, desc)), Some(from)) = (p, wallets.active()) else { return };
+                        self.say("Sending: checking the prepared contract, then signing…");
+                        let (view, wake) = (self.wallet.clone(), self.wake.clone());
+                        self.eng.pool.spawn(move || {
+                            let r = Address::parse(&to).and_then(|t| wallets.transfer(&from, &t, n, desc.as_deref()));
+                            if let Ok(mut v) = view.lock() {
+                                v.message = match r {
+                                    Ok(id) => format!("Sent. Deploy {}.", gaze_shard::bridge::short(&id)),
+                                    Err(e) => format!("Not sent: {e}"),
+                                };
+                            }
+                            wake.wake();
+                        });
+                        self.clear_input("wallet-amount");
+                    }
+                    _ => {}
+                }
+                self.refresh_balances();
+            }
+            "cancel" => {
+                if let Ok(mut v) = self.wallet.lock() {
+                    v.confirm = None;
+                    v.pending_send = None;
+                    v.message = "Cancelled.".into();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_wallet(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(n) = self.id("wallet") {
+            let want = if self.panel == "wallet" { "" } else { "hidden" };
+            if attr_of(&self.inner, n, "class").unwrap_or_default() != want {
+                let mut m = self.inner.mutate();
+                m.set_attribute(n, qn("class"), want);
+                changed = true;
+            }
+        }
+        if self.panel != "wallet" {
+            return changed;
+        }
+        let (balances, message, confirming) = match self.wallet.lock() {
+            Ok(v) => (v.balances.clone(), v.message.clone(), v.confirm.is_some()),
+            Err(_) => return changed,
+        };
+        let mut list = String::from("<b>Wallets</b> <span class=\"muted\">(the active wallet pays for every deploy)</span><br>");
+        let ws = self.eng.wallets.list();
+        if ws.is_empty() {
+            list.push_str("No wallets yet. Create one, or import the file F1R3Sky saved.<br>");
+        }
+        for (e, active) in ws {
+            let a = e.address.as_str();
+            list.push_str(&format!(
+                r#"<div class="row"><span class="addr{}">{}{}</span><span>{}</span><span>{}</span>{}<button data-action="wallet:export:{a}">Export</button><button data-action="wallet:remove:{a}">Remove</button></div>"#,
+                if active { " active" } else { "" },
+                if active { "● " } else { "" },
+                escape(a),
+                escape(&e.label),
+                balances.get(a).map(|b| format!("balance {}", escape(b))).unwrap_or_default(),
+                if active { String::new() } else { format!(r#"<button data-action="wallet:use:{a}">Pay with this</button>"#) },
+            ));
+        }
+        changed |= self.set_html("walletlist", list);
+        let mut msg = escape(&message);
+        if confirming {
+            msg.push_str(r#" <button data-action="wallet:confirm">Confirm</button><button data-action="wallet:cancel">Cancel</button>"#);
+        }
+        changed |= self.set_html("walletmsg", msg);
+        changed
     }
 
     fn set_html(&mut self, id: &'static str, html: String) -> bool {
@@ -412,9 +645,10 @@ impl ChromeDocument {
                 }
                 s
             }
-            _ => String::new(),
+            _ => String::new(), // "wallet" has its own section
         };
         changed |= self.set_html("panel", panel);
+        changed |= self.render_wallet();
 
         let mut status = format!("<span>{}</span>", escape(&status_text));
         if let Some(n) = notice {
@@ -546,5 +780,6 @@ mod tests {
         assert_eq!(Action::parse("allow:3:77"), Some(Action::Answer(3, 77, true)));
         assert_eq!(Action::parse("revoke:rho:gaze:net"), Some(Action::Revoke("rho:gaze:net".into())));
         assert_eq!(Action::parse("select:x"), None);
+        assert_eq!(Action::parse("wallet:use:1111abc"), Some(Action::Wallet("use:1111abc".into())));
     }
 }

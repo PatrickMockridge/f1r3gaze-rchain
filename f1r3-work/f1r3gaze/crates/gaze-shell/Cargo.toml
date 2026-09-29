@@ -30,6 +30,7 @@ gaze-net.workspace = true
 gaze-store.workspace = true
 gaze-blob.workspace = true
 gaze-shard.workspace = true
+gaze-wallet.workspace = true
 k1ndl1ng-norm.workspace = true
 getrandom = "0.2"
 url = "2"

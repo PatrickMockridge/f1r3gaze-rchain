@@ -20,6 +20,6 @@ pub mod node;
 pub mod site;
 pub mod term;
 
-pub use bridge::{Bridge, DriveSource, EventHub, Prompt, Rung, ShardConfig, ShardOut, ShardService};
-pub use keys::{FileKeystore, Keystore};
+pub use bridge::{Bridge, DriveSource, EventHub, KeyPayer, Payer, Prompt, Rung, ShardConfig, ShardOut, ShardService};
+pub use keys::{FileKeystore, Keystore, MemKeystore};
 pub use site::{SiteAddr, SiteManifest};
