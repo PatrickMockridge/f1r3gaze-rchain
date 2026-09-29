@@ -1,0 +1,9 @@
+[package]
+name = "gaze-store"
+description = "F1R3Gaze per-origin key-value store behind the store capability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+k1ndl1ng-norm.workspace = true

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>F1R3Gaze</string>
+  <key>CFBundleDisplayName</key><string>F1R3Gaze</string>
+  <key>CFBundleIdentifier</key><string>io.f1r3fly.f1r3gaze</string>
+  <key>CFBundleExecutable</key><string>f1r3gaze</string>
+  <key>CFBundleIconFile</key><string>f1r3gaze</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+  <key>CFBundleVersion</key><string>__VERSION__</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>© F1R3FLY.io. Apache-2.0.</string>
+</dict>
+</plist>

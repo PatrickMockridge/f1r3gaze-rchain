@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" viewBox="0 0 341.75 341.75">
+  <!-- Generator: Adobe Illustrator 30.2.1, SVG Export Plug-In . SVG Version: 2.1.1 Build 1)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: none;
+      }
+
+      .st1 {
+        fill: #010101;
+      }
+
+      .st2 {
+        fill: url(#linear-gradient2);
+      }
+
+      .st3 {
+        fill: url(#linear-gradient1);
+      }
+
+      .st4 {
+        fill: url(#radial-gradient);
+      }
+
+      .st5 {
+        fill: url(#linear-gradient);
+      }
+
+      .st6 {
+        clip-path: url(#clippath);
+      }
+    </style>
+    <clipPath id="clippath">
+      <rect class="st0" width="341.75" height="341.75"/>
+    </clipPath>
+    <linearGradient id="linear-gradient" x1="613.331" y1="45.111" x2="689.814" y2="-87.362" gradientTransform="translate(-539.879 205.793) rotate(-4.856)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#009188"/>
+      <stop offset="1" stop-color="#007bc4"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient1" x1="9219.529" y1="2429.313" x2="9296.676" y2="2295.691" gradientTransform="translate(9598.064 2106.799) rotate(-153.904) scale(1 -1)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#deffac"/>
+      <stop offset="1" stop-color="#8fc8e7"/>
+    </linearGradient>
+    <linearGradient id="linear-gradient2" x1="1108.424" y1="-504.778" x2="1153.077" y2="-504.778" gradientTransform="translate(-815.55 774.76) rotate(-11.485)" xlink:href="#linear-gradient"/>
+    <radialGradient id="radial-gradient" cx="-650.741" cy="961.883" fx="-650.741" fy="895.908" r="66.002" gradientTransform="translate(-653.854 1105.395) rotate(-169.698) scale(1.001 1.048) skewX(.542)" gradientUnits="userSpaceOnUse">
+      <stop offset=".159" stop-color="#ebe1a3"/>
+      <stop offset=".243" stop-color="#ebdf96"/>
+      <stop offset=".395" stop-color="#eedc75"/>
+      <stop offset=".598" stop-color="#f1d741"/>
+      <stop offset=".658" stop-color="#f3d630"/>
+      <stop offset=".995" stop-color="#f3d630"/>
+    </radialGradient>
+  </defs>
+  <g class="st6">
+    <path class="st1" d="M170.873,341.745c94.372,0,170.873-76.501,170.873-170.873S265.249,0,170.873,0,0,76.501,0,170.873s76.501,170.873,170.873,170.873"/>
+  </g>
+  <g>
+    <path class="st5" d="M178.49,88.101c-16.713,55.153-74.182,103.242-132.427,96.659-8.505-1.617-8.991-9.233-6.947-16.428,13.116-54.939,66.507-95.863,121.773-94.136,9.7.025,19.942,1.218,17.601,13.905Z"/>
+    <path class="st3" d="M193.127,90.919c-3.885,57.622,32.71,123.821,89.322,139.348,8.498,1.656,11.638-5.261,12.272-12.728,7.162-56.085-28.161-114.088-80.282-133.034-9.05-3.584-19.017-6.282-21.312,6.413Z"/>
+    <path class="st2" d="M215.646,60.86c.757-18.451-37.213-27.808-46.043-10.521-1.583,3.101-.031,6.884,3.068,7.707,11.459,3.042,24.898,4.962,36.473,8.108,3.16.857,6.355-1.74,6.501-5.294Z"/>
+    <path class="st4" d="M206.068,197.797c-20.57,118.627-100.633,100.585-77.537-15.163,19.595-12.363,36.34-28.803,48.772-47.894,4.879,22.525,14.749,44.183,28.765,63.056Z"/>
+  </g>
+</svg>

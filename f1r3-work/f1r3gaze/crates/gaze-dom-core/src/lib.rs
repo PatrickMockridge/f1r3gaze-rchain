@@ -72,6 +72,23 @@ pub enum Write<N> {
     Blur(N),
 }
 
+/// The node a write addresses.
+pub fn write_target<N: Copy>(w: &Write<N>) -> N {
+    match w {
+        Write::SetAttr(n, ..)
+        | Write::RemoveAttr(n, _)
+        | Write::SetText(n, _)
+        | Write::SetValue(n, _)
+        | Write::Class(n, ..)
+        | Write::Style(n, ..)
+        | Write::Insert(n, ..)
+        | Write::SetHtml(n, _)
+        | Write::Remove(n)
+        | Write::Focus(n)
+        | Write::Blur(n) => *n,
+    }
+}
+
 /// What a document engine must offer. Implemented by `mem::MemDom` here, by
 /// `gaze-dom-blitz` over `blitz-dom`, and by `gaze-reach` over a host DOM.
 pub trait DomBackend {
@@ -93,6 +110,16 @@ pub trait DomBackend {
     fn apply(&mut self, w: &Write<Self::Node>) -> Vec<(String, Self::Node)>;
     /// A canonical serialisation of the committed document.
     fn serialize(&self) -> String;
+
+    /// Apply a frame's writes in order, as one batch. `None` for a write whose
+    /// target was detached by the time it came up (an earlier write in the
+    /// same batch may detach it). Backends that can apply a batch under one
+    /// mutation session (Blitz: one `DocumentMutator`, one flush) override this.
+    fn apply_batch(&mut self, ws: &[Write<Self::Node>]) -> Vec<Option<Vec<(String, Self::Node)>>> {
+        ws.iter()
+            .map(|w| if self.attached(write_target(w)) { Some(self.apply(w)) } else { None })
+            .collect()
+    }
 
     fn is_inclusive_descendant(&self, n: Self::Node, of: Self::Node) -> bool {
         let mut cur = Some(n);
@@ -146,6 +173,7 @@ struct Listener<N> {
     once: bool,
     prevent: bool,
     stop: bool,
+    decide: bool,
     order: u64,
 }
 
@@ -158,7 +186,12 @@ struct Pending<N> {
 /// What dispatching one event produced.
 #[derive(Debug, Default)]
 pub struct Fired {
+    /// Data for ordinary listeners: delivered in the next frame.
     pub injections: Vec<Reply>,
+    /// Data for `decide` listeners: the host injects these at once and runs a
+    /// bounded synchronous drain, then reads `"prevent"`/`"stop"` on the reply
+    /// name it supplied.
+    pub sync: Vec<Reply>,
     pub prevent: bool,
     pub stop: bool,
 }
@@ -351,6 +384,7 @@ impl<B: DomBackend> Engine<B> {
                         once: flag("once"),
                         prevent: flag("prevent"),
                         stop: flag("stop"),
+                        decide: flag("decide"),
                         order: self.order,
                     },
                 );
@@ -450,39 +484,27 @@ impl<B: DomBackend> Engine<B> {
     pub fn commit(&mut self) -> (Vec<Reply>, [u8; 32]) {
         let mut out = Vec::new();
         let batch = std::mem::take(&mut self.batch);
-        for p in batch {
-            let target = match &p.write {
-                Write::SetAttr(n, ..)
-                | Write::RemoveAttr(n, _)
-                | Write::SetText(n, _)
-                | Write::SetValue(n, _)
-                | Write::Class(n, ..)
-                | Write::Style(n, ..)
-                | Write::Insert(n, ..)
-                | Write::SetHtml(n, _)
-                | Write::Remove(n)
-                | Write::Focus(n)
-                | Write::Blur(n) => *n,
-            };
-            if !self.backend.attached(target) {
-                if let Some(r) = p.ret {
-                    out.push(Reply {
-                        chan: r,
+        if !batch.is_empty() {
+            let writes: Vec<Write<B::Node>> = batch.iter().map(|p| p.write.clone()).collect();
+            let results = self.backend.apply_batch(&writes);
+            for (p, r) in batch.into_iter().zip(results) {
+                let Some(ret) = p.ret else { continue };
+                match r {
+                    None => out.push(Reply {
+                        chan: ret,
                         args: vec![err("detached", "write")],
-                    });
+                    }),
+                    Some(created) => {
+                        let refs: Vec<(Norm, Norm)> = created
+                            .iter()
+                            .map(|(k, n)| (Norm::str(k), name_norm(&self.name_for(p.root, *n))))
+                            .collect();
+                        out.push(Reply {
+                            chan: ret,
+                            args: vec![ok(Norm::map(refs))],
+                        });
+                    }
                 }
-                continue;
-            }
-            let created = self.backend.apply(&p.write);
-            if let Some(r) = p.ret {
-                let refs: Vec<(Norm, Norm)> = created
-                    .iter()
-                    .map(|(k, n)| (Norm::str(k), name_norm(&self.name_for(p.root, *n))))
-                    .collect();
-                out.push(Reply {
-                    chan: r,
-                    args: vec![ok(Norm::map(refs))],
-                });
             }
         }
         (out, self.doc_hash())
@@ -500,6 +522,21 @@ impl<B: DomBackend> Engine<B> {
     /// bubble listeners target to root, honouring static `stop`, `prevent`
     /// and `once`. `fields` are the event's own data.
     pub fn fire(&mut self, target: B::Node, ty: &str, fields: Vec<(String, Norm)>) -> Fired {
+        self.fire_with(target, ty, fields, true, None)
+    }
+
+    /// As [`fire`](Self::fire), for an event that may not bubble (capture and
+    /// target phases only), and with the host's reply name for `decide`
+    /// listeners. Without a reply name, `decide` listeners are treated as
+    /// ordinary ones.
+    pub fn fire_with(
+        &mut self,
+        target: B::Node,
+        ty: &str,
+        fields: Vec<(String, Norm)>,
+        bubbles: bool,
+        reply: Option<Key>,
+    ) -> Fired {
         let mut chain = Vec::new();
         let mut cur = Some(target);
         while let Some(c) = cur {
@@ -508,10 +545,12 @@ impl<B: DomBackend> Engine<B> {
         }
         chain.reverse(); // root .. target
         let mut fired = Fired::default();
-        let phases: [(bool, Vec<B::Node>); 2] =
-            [(true, chain.clone()), (false, chain.iter().rev().copied().collect())];
+        let bubble: Vec<B::Node> = if bubbles { chain.iter().rev().copied().collect() } else { vec![target] };
+        let phases: [(bool, Vec<B::Node>); 2] = [(true, chain.clone()), (false, bubble)];
         for (capture, nodes) in phases {
             for n in nodes {
+                // At the target both phases fire; capture listeners there run
+                // in the capture pass and bubble listeners in the bubble pass.
                 let mut here: Vec<(Key, Listener<B::Node>)> = self
                     .listeners
                     .iter()
@@ -524,14 +563,23 @@ impl<B: DomBackend> Engine<B> {
                     let mut m = fields.clone();
                     m.push(("target".into(), name_norm(&t)));
                     m.push(("type".into(), Norm::str(ty)));
+                    let sync = l.decide && reply.is_some();
+                    if sync {
+                        m.push(("reply".into(), name_norm(reply.as_ref().expect("checked"))));
+                    }
                     let datum = Norm::tuple(vec![
                         Norm::str(ty),
                         Norm::map(m.into_iter().map(|(k, v)| (Norm::str(&k), v)).collect()),
                     ]);
-                    fired.injections.push(Reply {
+                    let r = Reply {
                         chan: l.ch.clone(),
                         args: vec![datum],
-                    });
+                    };
+                    if sync {
+                        fired.sync.push(r);
+                    } else {
+                        fired.injections.push(r);
+                    }
                     fired.prevent |= l.prevent;
                     fired.stop |= l.stop;
                     if l.once {
@@ -544,6 +592,35 @@ impl<B: DomBackend> Engine<B> {
             }
         }
         fired
+    }
+
+    /// Does any listener for `ty` sit on `target` or an ancestor? Hosts use
+    /// this to skip events nobody listens for.
+    pub fn has_listener(&self, ty: &str) -> bool {
+        self.listeners.values().any(|l| l.ty == ty)
+    }
+
+    /// The path of child indices from the document root to `n`: a
+    /// backend-independent address, used by the replay log.
+    pub fn path_of(&self, n: B::Node) -> Vec<u32> {
+        let mut path = Vec::new();
+        let mut cur = n;
+        while let Some(p) = self.backend.parent(cur) {
+            let i = self.backend.children(p).iter().position(|c| *c == cur).unwrap_or(0);
+            path.push(i as u32);
+            cur = p;
+        }
+        path.reverse();
+        path
+    }
+
+    /// Resolve a path produced by [`path_of`](Self::path_of).
+    pub fn node_at(&self, path: &[u32]) -> Option<B::Node> {
+        let mut cur = self.backend.root();
+        for i in path {
+            cur = *self.backend.children(cur).get(*i as usize)?;
+        }
+        Some(cur)
     }
 
     pub fn listener_count(&self) -> usize {

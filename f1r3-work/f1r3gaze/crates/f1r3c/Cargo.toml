@@ -1,0 +1,13 @@
+[package]
+name = "f1r3c"
+description = "The F1R3Gaze toolchain: kernel f1r3lang to .knf, integrity strings, site packaging"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gaze-knf.workspace = true
+gaze-net.workspace = true
+gaze-shard.workspace = true
+k1ndl1ng-norm.workspace = true
+k1ndl1ng-parse.workspace = true

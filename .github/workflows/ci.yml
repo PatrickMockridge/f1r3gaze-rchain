@@ -1,0 +1,46 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+defaults:
+  run:
+    working-directory: f1r3-work/f1r3gaze
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: f1r3-work/f1r3gaze
+      - run: cargo test --workspace --locked
+      - name: Headless smoke test
+        shell: bash
+        run: |
+          cargo run --locked -p gaze-shell --bin f1r3gaze -- --profile "$RUNNER_TEMP/profile" \
+            --headless gaze://newtab --click "#lamp" | tee out.txt
+          grep -q 'id="lamp" class="lit"' out.txt
+
+  reach:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: f1r3-work/f1r3gaze
+      - run: cargo build --locked -p gaze-reach --target wasm32-unknown-unknown --profile reach
+      - run: node --check crates/gaze-reach/web/gaze-reach.js

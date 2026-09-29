@@ -1,0 +1,36 @@
+[package]
+name = "gaze-shell"
+description = "F1R3Gaze: a browser whose only execution mechanism is f1r3lang"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "f1r3gaze"
+path = "src/main.rs"
+
+[features]
+default = ["window"]
+# The windowed browser (winit + vello). Without it: headless tools only.
+window = ["dep:blitz-shell", "dep:anyrender_vello"]
+os-keyring = ["gaze-shard/os-keyring"]
+
+[dependencies]
+blitz-dom = { workspace = true, features = ["svg", "woff", "system-fonts", "file-input"] }
+blitz-html.workspace = true
+blitz-traits.workspace = true
+blitz-shell = { workspace = true, optional = true, features = ["clipboard"] }
+anyrender_vello = { workspace = true, optional = true }
+gaze-broker.workspace = true
+gaze-dom-blitz.workspace = true
+gaze-exec.workspace = true
+gaze-dom-core.workspace = true
+gaze-knf.workspace = true
+gaze-net.workspace = true
+gaze-store.workspace = true
+gaze-blob.workspace = true
+gaze-shard.workspace = true
+k1ndl1ng-norm.workspace = true
+getrandom = "0.2"
+url = "2"
+keyboard-types = "0.7"

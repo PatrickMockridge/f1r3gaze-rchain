@@ -1,10 +1,36 @@
 [workspace]
 resolver = "2"
 members = [
+  # Portable core (wasm32-clean, std + CampF1R3 only, #![forbid(unsafe_code)]).
   "crates/gaze-graded",
   "crates/gaze-knf",
   "crates/gaze-dom-core",
   "crates/gaze-exec",
+  "crates/gaze-broker",
+  # Native.
+  "crates/gaze-net",
+  "crates/gaze-store",
+  "crates/gaze-blob",
+  "crates/gaze-shard",
+  "crates/gaze-dom-blitz",
+  "crates/gaze-shell",
+  "crates/f1r3c",
+  # Reach tier (wasm32 cdylib).
+  "crates/gaze-reach",
+]
+default-members = [
+  "crates/gaze-graded",
+  "crates/gaze-knf",
+  "crates/gaze-dom-core",
+  "crates/gaze-exec",
+  "crates/gaze-broker",
+  "crates/gaze-net",
+  "crates/gaze-store",
+  "crates/gaze-blob",
+  "crates/gaze-shard",
+  "crates/gaze-dom-blitz",
+  "crates/gaze-shell",
+  "crates/f1r3c",
 ]
 
 [workspace.package]
@@ -13,15 +39,48 @@ edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
 authors = ["F1R3FLY.io"]
+repository = "https://github.com/F1R3FLY-io/F1R3Gaze"
 
 [workspace.dependencies]
-# CampF1R3 at the gaze/k1g-apertures branch (upstream work packages U1, U3, U4, U6).
-# Switch to a git dependency pinned to a revision once the branch lands upstream.
-k1ndl1ng-parse = { path = "../campf1r3/crates/k1ndl1ng-parse" }
-k1ndl1ng-norm = { path = "../campf1r3/crates/k1ndl1ng-norm" }
-campf1r3-core = { path = "../campf1r3/crates/campf1r3-core" }
-k1ndl1ng-campf1r3 = { path = "../campf1r3/crates/k1ndl1ng-campf1r3" }
-b3ll0ws = { path = "../campf1r3/crates/b3ll0ws" }
+# CampF1R3, branch gaze/k1g-apertures (upstream work packages U1, U3, U4, U6),
+# pinned by revision as the specification requires. For local work on
+# CampF1R3 itself, override with a [patch] section pointing at a checkout.
+k1ndl1ng-parse = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
+k1ndl1ng-norm = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
+campf1r3-core = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
+k1ndl1ng-campf1r3 = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
+b3ll0ws = { git = "https://github.com/F1R3FLY-io/campf1r3", rev = "c4e9271b1508b74217b745ebb046ee579b56cd31" }
+
+# Blitz at the specification's pin (0.3.0-beta.2, 674d7d2).
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "674d7d2144585baa0f7368b8ad76371c93fe1b65", default-features = false }
+blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "674d7d2144585baa0f7368b8ad76371c93fe1b65", default-features = false }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "674d7d2144585baa0f7368b8ad76371c93fe1b65", default-features = false }
+blitz-shell = { git = "https://github.com/DioxusLabs/blitz", rev = "674d7d2144585baa0f7368b8ad76371c93fe1b65", default-features = false }
+blitz-paint = { git = "https://github.com/DioxusLabs/blitz", rev = "674d7d2144585baa0f7368b8ad76371c93fe1b65", default-features = false }
+anyrender_vello = "0.14.0"
+
+# In-workspace.
 gaze-graded = { path = "crates/gaze-graded" }
 gaze-knf = { path = "crates/gaze-knf" }
 gaze-dom-core = { path = "crates/gaze-dom-core" }
+gaze-exec = { path = "crates/gaze-exec" }
+gaze-broker = { path = "crates/gaze-broker" }
+gaze-net = { path = "crates/gaze-net" }
+gaze-store = { path = "crates/gaze-store" }
+gaze-blob = { path = "crates/gaze-blob" }
+gaze-shard = { path = "crates/gaze-shard" }
+gaze-dom-blitz = { path = "crates/gaze-dom-blitz" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"
+
+# The reach tier is size-sensitive.
+[profile.reach]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

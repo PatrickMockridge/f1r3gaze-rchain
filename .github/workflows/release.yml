@@ -1,0 +1,109 @@
+# Tag vX.Y.Z to publish signed installers for macOS, Windows and Linux.
+#
+# Secrets (each platform ships unsigned, with a warning, if its are absent):
+#   macOS:   MACOS_CERT_P12 (base64 Developer ID Application .p12), MACOS_CERT_PASSWORD,
+#            MACOS_SIGN_IDENTITY, APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD (notarisation)
+#   Windows: WINDOWS_CERT_PFX (base64 .pfx), WINDOWS_CERT_PASSWORD
+#   Linux:   GPG_PRIVATE_KEY (armoured), GPG_PASSPHRASE — signs SHA256SUMS for every artifact
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (no v)"
+        required: true
+permissions:
+  contents: write
+defaults:
+  run:
+    shell: bash
+    working-directory: f1r3-work/f1r3gaze
+env:
+  CARGO_TERM_COLOR: always
+  VERSION: ${{ inputs.version || github.ref_name }}
+jobs:
+  linux:
+    runs-on: ubuntu-22.04   # glibc 2.35, the .deb's floor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "1.91" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: f1r3-work/f1r3gaze }
+      - run: cargo build --locked --release -p gaze-shell -p f1r3c
+      - name: Package
+        run: |
+          V="${VERSION#v}"
+          curl -sSL -o /tmp/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          printf '#!/bin/sh\nexec /tmp/appimagetool --appimage-extract-and-run "$@"\n' > /tmp/ait && chmod +x /tmp/ait
+          APPIMAGETOOL=/tmp/ait DIST=dist packaging/linux/package.sh "$V" target/release
+      - uses: actions/upload-artifact@v4
+        with: { name: linux, path: f1r3-work/f1r3gaze/dist/* }
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91"
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: f1r3-work/f1r3gaze }
+      - run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked --release --target $t -p gaze-shell -p f1r3c --features gaze-shell/os-keyring
+          done
+      - name: Package, sign, notarise
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          DIST=dist packaging/macos/package.sh "${VERSION#v}" \
+            target/aarch64-apple-darwin/release target/x86_64-apple-darwin/release
+      - uses: actions/upload-artifact@v4
+        with: { name: macos, path: f1r3-work/f1r3gaze/dist/* }
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with: { toolchain: "1.91" }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: f1r3-work/f1r3gaze }
+      - run: cargo build --locked --release -p gaze-shell -p f1r3c --features gaze-shell/os-keyring
+      - run: dotnet tool install --global wix --version 4.0.5
+      - name: Package and sign
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: packaging\windows\package.ps1 -Version ("$env:VERSION" -replace '^v','') -Bin target\release -Dist dist
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: f1r3-work/f1r3gaze/dist/* }
+
+  publish:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: f1r3-work/f1r3gaze/dist, merge-multiple: true }
+      - name: Checksums and signature
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: packaging/sign-checksums.sh dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', inputs.version) }}
+          draft: true
+          files: f1r3-work/f1r3gaze/dist/*

@@ -1,0 +1,12 @@
+[package]
+name = "gaze-net"
+description = "F1R3Gaze networking: HTTP engine, Blitz NetProvider with hash verification, the net capability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blitz-traits.workspace = true
+k1ndl1ng-norm.workspace = true
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+url = "2"

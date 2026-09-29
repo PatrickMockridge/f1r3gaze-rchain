@@ -1,0 +1,25 @@
+[package]
+name = "gaze-shard"
+description = "F1R3Gaze shard bridge: keystore, deploys, registry resolution, assurance rungs, watches, sessions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Keep site keys in the OS credential store (Keychain, Windows Credential
+# Manager). Linux uses the file keystore unless this is enabled with a
+# secret-service backend.
+os-keyring = ["dep:keyring"]
+
+[dependencies]
+gaze-net.workspace = true
+gaze-blob.workspace = true
+gaze-knf.workspace = true
+k1ndl1ng-norm.workspace = true
+k1ndl1ng-parse.workspace = true
+k256 = { version = "0.13", features = ["ecdsa"] }
+getrandom = "0.2"
+serde_json = "1"
+tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+keyring = { version = "3", optional = true, features = ["apple-native", "windows-native"] }

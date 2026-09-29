@@ -1,0 +1,12 @@
+[package]
+name = "gaze-broker"
+description = "F1R3Gaze capability broker: manifests to grants, policy, prompts, routing, revocation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gaze-knf.workspace = true
+
+[dev-dependencies]
+k1ndl1ng-parse.workspace = true

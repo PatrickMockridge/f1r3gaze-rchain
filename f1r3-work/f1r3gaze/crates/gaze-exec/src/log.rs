@@ -9,7 +9,19 @@
 //!   0x03 Commit  n u64 LE, hash (32)
 //!   0x04 Budget  n u64 LE
 //!   0x05 Error   n u64 LE, LEB len + UTF-8
+//!   0x06 Dispatch n u64 LE, bubbles u8, LEB count + LEB path indices,
+//!                LEB len + type, LEB len + encoding of the fields map
+//!   0x07 Script  program hash (32), grant hash (32)
 //! ```
+//!
+//! A `Dispatch` records a user-input event between frames `n` and `n + 1`
+//! by the path of child indices to its target, which is the same on every
+//! backend whose committed documents hash alike. Replay re-runs it, so the
+//! names it mints, the `once` listeners it retires and any synchronous
+//! `decide` drain it performs happen again exactly; the data it produced for
+//! ordinary listeners is not regenerated, because those injections are
+//! already in the log. A `Script` record lists each script after the first
+//! in a multi-script document, in document order.
 //!
 //! Injections are stored as the normal form of the send they cause, so the log
 //! carries names and data in the executive's own encoding. Grants are recorded
@@ -37,6 +49,8 @@ pub enum Record {
     Commit { n: u64, hash: [u8; 32] },
     Budget { n: u64 },
     Error { n: u64, msg: String },
+    Dispatch { n: u64, path: Vec<u32>, ty: String, fields: Norm, bubbles: bool },
+    Script { program_hash: [u8; 32], grant_hash: [u8; 32] },
 }
 
 #[derive(Clone, Debug)]
@@ -138,6 +152,24 @@ impl TabLog {
                     leb(msg.len() as u32, &mut o);
                     o.extend_from_slice(msg.as_bytes());
                 }
+                Record::Dispatch { n, path, ty, fields, bubbles } => {
+                    o.push(6);
+                    o.extend_from_slice(&n.to_le_bytes());
+                    o.push(*bubbles as u8);
+                    leb(path.len() as u32, &mut o);
+                    for i in path {
+                        leb(*i, &mut o);
+                    }
+                    leb(ty.len() as u32, &mut o);
+                    o.extend_from_slice(ty.as_bytes());
+                    leb(fields.encode().len() as u32, &mut o);
+                    o.extend_from_slice(fields.encode());
+                }
+                Record::Script { program_hash, grant_hash } => {
+                    o.push(7);
+                    o.extend_from_slice(program_hash);
+                    o.extend_from_slice(grant_hash);
+                }
             }
         }
         o
@@ -182,6 +214,22 @@ impl TabLog {
                         msg: String::from_utf8_lossy(r.blob()?).into_owned(),
                     }
                 }
+                6 => {
+                    let n = r.u64()?;
+                    let bubbles = r.u8()? != 0;
+                    let count = r.leb()?;
+                    let mut path = Vec::with_capacity(count.min(4096));
+                    for _ in 0..count {
+                        path.push(r.leb()? as u32);
+                    }
+                    let ty = String::from_utf8_lossy(r.blob()?).into_owned();
+                    let fields = Norm::decode(r.blob()?).map_err(|_| LogError::BadInject)?;
+                    Record::Dispatch { n, path, ty, fields, bubbles }
+                }
+                7 => Record::Script {
+                    program_hash: r.h32()?,
+                    grant_hash: r.h32()?,
+                },
                 t => return Err(LogError::BadTag(t)),
             };
             records.push(rec);

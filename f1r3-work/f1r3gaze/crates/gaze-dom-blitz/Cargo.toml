@@ -1,0 +1,18 @@
+[package]
+name = "gaze-dom-blitz"
+description = "The F1R3Gaze DomBackend over blitz-dom, RhoDocument and RhoEventHandler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+blitz-dom.workspace = true
+blitz-html.workspace = true
+blitz-traits.workspace = true
+k1ndl1ng-norm.workspace = true
+k1ndl1ng-parse.workspace = true
+gaze-dom-core.workspace = true
+gaze-exec.workspace = true
+gaze-knf.workspace = true
+url = "2"
+keyboard-types = "0.7"

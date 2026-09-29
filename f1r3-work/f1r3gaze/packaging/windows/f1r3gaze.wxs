@@ -1,0 +1,48 @@
+<!-- WiX v4. Build: wix build f1r3gaze.wxs -arch x64 -d Version=0.1.0 -d Bin=..\bin -d Icons=..\icons -o F1R3Gaze.msi -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="F1R3Gaze" Manufacturer="F1R3FLY.io" Version="$(var.Version)"
+           UpgradeCode="6B0E6C2A-3F1D-4C55-9E6B-F1A3C0DE2026" Scope="perMachine" Language="1033">
+    <SummaryInformation Description="F1R3Gaze, a browser whose only execution mechanism is f1r3lang" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of F1R3Gaze is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AppIcon" SourceFile="$(var.Icons)\f1r3gaze.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/F1R3FLY-io/F1R3Gaze" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="F1R3Gaze" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="F1R3Gaze">
+      <Component Directory="INSTALLFOLDER">
+        <File Id="f1r3gaze.exe" Source="$(var.Bin)\f1r3gaze.exe" KeyPath="yes">
+          <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="F1R3Gaze"
+                    WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="yes" />
+        </File>
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Id="f1r3c.exe" Source="$(var.Bin)\f1r3c.exe" KeyPath="yes" />
+        <!-- f1r3c on PATH for publishers. -->
+        <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" />
+      </Component>
+      <!-- f1r3:// and f1r3h:// open in F1R3Gaze. -->
+      <Component Id="SchemeF1r3" Directory="INSTALLFOLDER">
+        <RegistryKey Root="HKLM" Key="Software\Classes\f1r3">
+          <RegistryValue Type="string" Value="URL:F1R3 shard site" KeyPath="yes" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryValue Key="DefaultIcon" Type="string" Value="[INSTALLFOLDER]f1r3gaze.exe,0" />
+          <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLFOLDER]f1r3gaze.exe&quot; &quot;%1&quot;" />
+        </RegistryKey>
+      </Component>
+      <Component Id="SchemeF1r3h" Directory="INSTALLFOLDER">
+        <RegistryKey Root="HKLM" Key="Software\Classes\f1r3h">
+          <RegistryValue Type="string" Value="URL:F1R3 content by hash" KeyPath="yes" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryValue Key="DefaultIcon" Type="string" Value="[INSTALLFOLDER]f1r3gaze.exe,0" />
+          <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLFOLDER]f1r3gaze.exe&quot; &quot;%1&quot;" />
+        </RegistryKey>
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

@@ -1,0 +1,9 @@
+[package]
+name = "gaze-blob"
+description = "F1R3Gaze content-addressed blobs: sources, mirrors, and the local content cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gaze-net.workspace = true

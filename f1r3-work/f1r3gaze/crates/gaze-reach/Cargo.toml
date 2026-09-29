@@ -1,0 +1,17 @@
+[package]
+name = "gaze-reach"
+description = "The F1R3Gaze reach tier: the executive and DOM protocol in a stock browser, as one wasm module"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gaze-dom-core.workspace = true
+gaze-exec.workspace = true
+gaze-knf.workspace = true
+k1ndl1ng-norm.workspace = true
+k1ndl1ng-parse.workspace = true
+gaze-store.workspace = true

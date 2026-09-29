@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=F1R3Gaze
+GenericName=Web Browser
+Comment=A browser whose only execution mechanism is f1r3lang
+Exec=f1r3gaze %u
+Icon=f1r3gaze
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=text/html;x-scheme-handler/f1r3;x-scheme-handler/f1r3h;x-scheme-handler/https;x-scheme-handler/http;
+StartupWMClass=f1r3gaze

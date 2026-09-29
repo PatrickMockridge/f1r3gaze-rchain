@@ -1,0 +1,50 @@
+# The reach tier: the executive as a wasm module plus its JS host, published
+# as a static site (GitHub Pages). Any page can use it by including
+# gaze-reach.js next to gaze_reach.wasm.
+name: reach
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+defaults:
+  run:
+    working-directory: f1r3-work/f1r3gaze
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.91"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: f1r3-work/f1r3gaze }
+      - run: cargo build --locked -p gaze-reach --target wasm32-unknown-unknown --profile reach
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          cp target/wasm32-unknown-unknown/reach/gaze_reach.wasm _site/
+          cp crates/gaze-reach/web/gaze-reach.js crates/gaze-reach/web/index.html _site/
+          # Optional size pass; the module works without it.
+          if command -v wasm-opt >/dev/null; then wasm-opt -Oz -o _site/gaze_reach.wasm _site/gaze_reach.wasm; fi
+          ls -la _site
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: f1r3-work/f1r3gaze/_site }
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
