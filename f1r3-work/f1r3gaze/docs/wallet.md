@@ -31,6 +31,9 @@ f1r3gaze wallet export ADDRESS [FILE]  write the wallet file (0600)
 f1r3gaze wallet use ADDRESS            make ADDRESS the payer
 f1r3gaze wallet list | balance [ADDRESS] | remove ADDRESS
 f1r3gaze wallet send TO AMOUNT [NOTE]  transfer from the active wallet
+f1r3gaze wallet history [ADDRESS] [--blocks N] [--json]
+                                       an address's transfers: Embers' index
+                                       on f1r3fly, the node's own blocks on rchain
 ```
 
 The window has the same in its **Wallet** panel.
@@ -72,3 +75,34 @@ signing it
 The call carries no deployer identity, so a dishonest server can at worst
 waste the capped fee. The tests run an honest mock Embers and a dishonest one
 that swaps the recipient: nothing is signed or sent to the dishonest one.
+
+That is the **f1r3fly** path. On the **rchain** dialect balances, transfers and
+the devnet faucet go through the node's native `rho:rchain:revVault` instead
+(`getBalance` / `transfer`), and `embers_api` is unused. History follows the
+same split, and `f1r3gaze wallet history` reads it from whichever side is in
+play: Embers' index on f1r3fly, and the node's own
+`GET /api/transactions/{blockHash}` on rchain, walked over the last `--blocks`
+(default 20) blocks for the address. Rows name the block they were found in.
+
+The rchain history is wired to the node's documented shape, but on the rnode
+built here the route it needs reports no block at all, and this is written down
+rather than hidden. Three limits, measured against rnode `457671bf7`; the command
+names whichever it hits instead of returning an empty list:
+
+- `api-server.enable-reporting = true`, or the route is a 404.
+- A node that does **not validate**. `BlockReportApi::block_report` refuses when
+  the node holds a validator identity, so a validating node answers 400 whatever
+  reporting is set to: replaying a block for consensus is not the same service as
+  replaying it for a client. This is a node *role*, not a flag. Every node
+  `f1r3gaze devnet up` starts is a validator, so a launcher devnet serves the
+  rest of the chain reads and refuses this one.
+- A **read-only** node passes the role check and still fails: a report is a
+  *replay*, nothing fills the report cache at startup, and replaying a historical
+  block reinstalls its system continuations into a space that already holds them —
+  which `RSpace::install` refuses once startup is over. 45 of 50 consecutive
+  blocks answered that, and the five that replayed returned 400
+  `unexpected user report length 0` instead, a deploy whose replay yields no
+  events not being in the node's 1/2/3 mapping of a deploy's report.
+
+So the client is correct and the node's route is not, and `wallet history` on
+rchain has no live proof — only tests against a mock speaking that shape.

@@ -10,7 +10,11 @@ use gaze_shard::deploy::{public_key, sign_bytes};
 use k256::ecdsa::SigningKey;
 use serde_json::{Value, json};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One transfer as Embers reports it. `Serialize` is for `wallet history
+/// --json`; the field names are Embers', and differ from the rchain dialect's
+/// rows, which come from the node rather than an index.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Transfer {
     pub id: String,
     pub timestamp: String,

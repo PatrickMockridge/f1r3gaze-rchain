@@ -16,6 +16,7 @@ pub mod bridge;
 pub mod chain;
 pub mod deploy;
 pub mod expr;
+pub mod history;
 pub mod keys;
 pub mod node;
 pub mod pos;

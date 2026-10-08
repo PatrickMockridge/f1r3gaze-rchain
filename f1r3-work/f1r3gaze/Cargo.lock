@@ -1269,6 +1269,7 @@ dependencies = [
  "gaze-shard",
  "k1ndl1ng-norm",
  "k256",
+ "serde",
  "serde_json",
  "sha3",
 ]

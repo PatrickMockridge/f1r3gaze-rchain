@@ -12,6 +12,7 @@ mod rchain;
 
 use crate::chain::{self, Blocks};
 use crate::deploy::SignedDeploy;
+use crate::history;
 use crate::pos;
 use crate::txn::{self, TxnRequest};
 use gaze_net::{Http, HttpRequest};
@@ -34,6 +35,15 @@ fn unverified_on_f1r3fly(what: &str) -> String {
 /// [`Node::call`] — so an rchain-only route cannot physically reach an f1r3fly
 /// node, however the caller behaves.
 const NO_RCHAIN_READS: &str = "the chain and staking reads are the rchain dialect's; f1r3fly has no such route";
+
+/// Whether a node error was a rate-limit refusal.
+///
+/// The one failure worth waiting out rather than giving up on: a history walk
+/// is dozens of requests, and `/api/transactions` shares the node's deploy rate
+/// limiter, so a 429 is expected rather than exceptional.
+pub fn is_rate_limited(e: &str) -> bool {
+    e.contains("HTTP 429")
+}
 
 /// Which node the bridge speaks to.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -117,8 +127,10 @@ impl Node {
         }
     }
 
-    /// One JSON request; on a non-2xx, the node's message from the body.
-    fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+    /// One JSON request, with the status kept — so a caller can tell a route
+    /// that is *missing* (a 404, which on this node often means a feature is
+    /// switched off) from one that answered badly.
+    fn call_status(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
         let r = self
             .http
             .send(&HttpRequest {
@@ -129,11 +141,17 @@ impl Node {
             })
             .map_err(|e| format!("{}: {e}", self.base))?;
         let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::String(String::from_utf8_lossy(&r.body).into()));
-        if (200..300).contains(&r.status) {
+        Ok((r.status, v))
+    }
+
+    /// One JSON request; on a non-2xx, the node's message from the body.
+    fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        let (status, v) = self.call_status(method, path, body)?;
+        if (200..300).contains(&status) {
             Ok(v)
         } else {
             let msg = v.get("message").or_else(|| v.get("error")).map(|m| m.to_string()).unwrap_or_else(|| v.to_string());
-            Err(format!("{} {path}: HTTP {}: {msg}", self.base, r.status))
+            Err(format!("{} {path}: HTTP {status}: {msg}", self.base))
         }
     }
 
@@ -237,6 +255,16 @@ impl Node {
     pub fn shards(&self) -> Result<chain::Shards, String> {
         match self.dialect {
             NodeDialect::Rchain => rchain::shards(self),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    /// The REV transfers in the block with this hash, from the node's own
+    /// report. Off by default on the node (`api-server.enable-reporting`), and
+    /// a 404 then, which [`rchain::transactions`] turns into that advice.
+    pub fn transactions(&self, hash: &str) -> Result<Vec<history::Transfer>, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::transactions(self, hash),
             NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
         }
     }

@@ -459,6 +459,11 @@ fn site(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
     }
 }
 
+/// How many blocks `wallet history` walks on rchain when `--blocks` is not
+/// given. A walk is one block report per block, so the default stays modest;
+/// `history::HISTORY_MAX_BLOCKS` is the ceiling.
+const DEFAULT_HISTORY_BLOCKS: i32 = 20;
+
 fn wallet(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
     use gaze_wallet::Address;
     let w = &eng.wallets;
@@ -503,16 +508,83 @@ fn wallet(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
         "balance" => {
             let a = chosen(1)?;
             // The rchain dialect reads the balance from the node's native
-            // `revVault`; the f1r3fly dialect reads it from Embers, which is
-            // also the only one that reports transfer history.
+            // `revVault`; the f1r3fly dialect reads it from Embers. The
+            // *transfers* are `wallet history` on both -- which is what the
+            // dump that used to trail the f1r3fly balance became.
             if eng.bridge.cfg.dialect == gaze_shard::NodeDialect::Rchain {
                 let (rung, drops) = eng.bridge.rev_balance(a.as_str())?;
                 println!("{a}  {drops} drops ({})", rung.name());
             } else {
                 let s = w.state(&a)?;
                 println!("{a}  {}", s.balance);
-                for t in s.transfers.iter().rev().take(20) {
+            }
+            println!("  (transfers: `f1r3gaze wallet history`)");
+        }
+        "history" => {
+            // Not `read_args`: that refuses on f1r3fly, and both dialects
+            // answer here -- from Embers' index on one, from the node's own
+            // block reports on the other.
+            let (mut json, mut blocks, mut addr) = (false, None, None);
+            let mut it = args.iter().skip(1);
+            while let Some(x) = it.next() {
+                match x.as_str() {
+                    "--json" => json = true,
+                    "--blocks" => {
+                        blocks = Some(
+                            it.next()
+                                .and_then(|n| n.parse::<i32>().ok())
+                                .ok_or("wallet history --blocks wants a number")?,
+                        )
+                    }
+                    other if addr.is_none() => addr = Some(other.to_string()),
+                    other => return Err(format!("wallet history: unexpected argument {other}")),
+                }
+            }
+            let a = match addr {
+                Some(a) => Address::parse(&a)?,
+                None => w.active().ok_or("no active wallet")?,
+            };
+            if eng.bridge.cfg.dialect == gaze_shard::NodeDialect::Rchain {
+                let (rung, h) = eng.bridge.transfer_history(a.as_str(), blocks.unwrap_or(DEFAULT_HISTORY_BLOCKS))?;
+                if json {
+                    return print_json(serde_json::to_value(&h).map_err(|e| e.to_string())?);
+                }
+                for t in &h.transfers {
+                    println!(
+                        "  #{}  {} -> {}  {}  {}{}",
+                        t.block_number,
+                        t.from_addr,
+                        t.to_addr,
+                        t.amount,
+                        t.kind,
+                        t.fail_reason.as_deref().map(|r| format!("  (failed: {r})")).unwrap_or_default()
+                    );
+                }
+                if h.blocks_unread > 0 {
+                    println!(
+                        "  ({} of {} blocks could not be read; their transfers are not listed)",
+                        h.blocks_unread,
+                        h.blocks_unread + h.blocks_read
+                    );
+                }
+                if h.transfers.is_empty() {
+                    println!("  no transfers for {a} in the last {} blocks ({})", h.blocks_read, rung.name());
+                }
+            } else {
+                // Embers keeps the index, so there is no window to walk -- and
+                // saying so beats ignoring the flag.
+                if blocks.is_some() {
+                    eprintln!("f1r3gaze: --blocks does not apply to Embers' history; it is not a walk");
+                }
+                let ts = w.state(&a)?.transfers;
+                if json {
+                    return print_json(serde_json::to_value(&ts).map_err(|e| e.to_string())?);
+                }
+                for t in ts.iter().rev() {
                     println!("  {}  {} -> {}  {}  {}", t.timestamp, t.from, t.to, t.amount, t.description.as_deref().unwrap_or(""));
+                }
+                if ts.is_empty() {
+                    println!("  no transfers for {a}");
                 }
             }
         }

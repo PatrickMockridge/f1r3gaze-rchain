@@ -23,6 +23,9 @@ f1r3gaze --headless URL [--allow] [--click SELECTOR]... [--timeout SECS] [--wait
 f1r3gaze --profile DIR ...          use DIR as the profile (also: F1R3GAZE_PROFILE)
 f1r3gaze wallet new|import|export|use|list|balance|send|remove ...
                                     the wallets that pay for deploys (docs/wallet.md)
+f1r3gaze wallet history [ADDRESS] [--blocks N] [--json]
+                                    an address's REV transfers: the node's own
+                                    blocks on rchain, Embers' index on f1r3fly
 f1r3gaze chain block HASH | blocks [N] | find-deploy ID | finalized HASH
                | pool | caps | shards     [--json]
 f1r3gaze chain propose              force a block (needs `admin = …`)
@@ -200,7 +203,7 @@ Three defects in the existing code were found and fixed on the way:
 
 ## Tests
 
-116 tests in this workspace, all passing — eight of them env-gated live tests
+124 tests in this workspace, all passing — nine of them env-gated live tests
 against a running `rnode` (CampF1R3 carries its own 181):
 
 | crate | tests | what they establish |
@@ -292,8 +295,9 @@ node:
 | shard id | `root` | `/root` |
 | wallet balance | Embers `state` | `revVault!("getBalance", addr, *ret)` through an exploratory deploy |
 | wallet transfer | an Embers prepared contract | `revVault!("transfer", *deployerId, to, drops, *ret)`, as a deploy |
+| transfer history | Embers `state.transfers` | `GET /api/transactions/{blockHash}`, walked over the last `N` blocks — wired, but the route reports no block on rnode `457671bf7` (see below) |
 | faucet | Embers | `POST /api/faucet {address}` |
-| chain reads | — (no counterpart) | `block` / `blocks` / `deploy` / `is-finalized` / `deploys` / `capabilities` / `shards` |
+| chain reads | — (no counterpart) | `block` / `blocks` / `txns` / `deploy` / `is-finalized` / `deploys` / `capabilities` / `shards` |
 | staking reads | — (no counterpart) | `/api/v1/pos`, `/api/v1/pos/delegations`, and the read-only `rho:rchain:pos` methods |
 | staking writes | — (no counterpart) | `bond` / `withdraw` through the native `rho:rchain:pos`, on the payer's own key |
 | delegation | — (no counterpart) | `delegate` / `undelegate` on a **named** operator, through the native `rho:rchain:pos` |
@@ -301,32 +305,68 @@ node:
 | propose (admin) | — (not wired) | `POST /api/propose`, on the admin port named by `admin = …` |
 | cross-shard txn | — (not wired) | `POST /api/v1/txn`, on a **gateway** node's admin port |
 
-Two things are lost on rchain, and are dialect-scoped rather than papered over:
+One thing is lost on rchain, and it is dialect-scoped rather than papered over:
 
 - **A measured deploy cost.** rchain has no estimate endpoint, so the consent
   prompt quotes a bound (`phlo_limit`, default 250000) instead of a price.
-- **Wallet transfer history.** Balances, REV transfers and the devnet faucet
-  work on both dialects -- on rchain through the node's native
-  `rho:rchain:revVault` (`getBalance` / `transfer`), on f1r3fly through Embers.
-  What rchain has no counterpart for is Embers' *server-side history*, so
-  `embers_api` stays f1r3fly-only and `f1r3gaze wallet balance` prints a bare
-  balance there.
+
+Balances, REV transfers and the devnet faucet work on both dialects -- on
+rchain through the node's native `rho:rchain:revVault` (`getBalance` /
+`transfer`), on f1r3fly through Embers. So does **transfer history**, which is
+`f1r3gaze wallet history` -- but from a different place on each, and the
+difference is real rather than cosmetic. f1r3fly reads Embers' *index*, so its
+history is as deep as the service's. rchain reads the node's **own**
+`/api/transactions/{blockHash}` and walks the last `N` blocks for the address
+(`--blocks`, default 20), so it is only as deep as the walk. The node sends each
+transfer's `retUnforgeable` as a whole RChain `Par` AST, which the fork neither
+models nor forwards.
+
+**The rchain side of that is wired to the node's documented shape but has no
+working path on the rnode built here, and the docs should not imply otherwise.**
+Three limits were measured against rnode `457671bf7`; the command names whichever
+one it hits, because each reads like the wrong thing on its own:
+
+- Without `api-server.enable-reporting = true` the route is a **404** — which
+  reads like a bad block hash rather than a switched-off feature.
+- A node that **validates** answers **400**. `BlockReportApi::block_report`
+  refuses outright when the node holds a validator identity, because replaying a
+  block for consensus is not the same service as replaying it for a client. This
+  is a node *role*, not a flag — and **every node `f1r3gaze devnet up` starts is
+  a validator**, so a launcher devnet serves the whole chain read surface and
+  still refuses this one.
+- A **read-only** node passes the role check and then fails anyway, for a
+  structural reason: a report is a *replay*, nothing fills the report cache at
+  startup, and replaying a historical block reinstalls its system continuations
+  into a space that already holds them — which `RSpace::install` refuses once
+  startup is over. **45 of 50 consecutive blocks answered this**, and the five
+  that replayed produced a **400** `unexpected user report length 0` instead: a
+  deploy whose replay yields no events is not in the node's 1/2/3 mapping of a
+  deploy's report. So the route reports *no* block on that build, in either
+  role, whatever reporting is set to.
+
+That is a finding about rnode rather than about this fork, and it is written down
+rather than worked around: the client sends the documented request and parses the
+documented reply — all of which is pinned by tests against a mock node speaking
+that shape — and the gap is the node's to close. `wallet history` on rchain is
+therefore implemented and unit-tested, but **never exercised against a real
+node**, which is the honest state and not the same as it working.
 
 A single-validator `rnode` proposes blocks but never finalizes, so
 `/api/last-finalized-block` answers 400; the rchain dialect falls back to the
 newest block from `/api/blocks` as its anchor. On a net that does finalize, the
 fringe is used.
 
-The chain and staking reads are the mirror image of the two losses above: they
+The chain and staking reads are the mirror image of the loss above: they
 are **rchain-only**. f1r3fly has no counterpart for them, so `f1r3gaze chain`
 and `f1r3gaze pos` refuse there and a page's `chain!` verb answers
 `("err","unavailable",…)`. Nothing rchain-shaped is ever put on the wire — the
 f1r3fly arms are written so they do not call the HTTP layer at all, and a test
 asserts the node's request log stays clean.
 
-A page reaches the reads through one `chain!` verb, `chain!("block", HASH, ret)`
-and so on, which is its own consent class ("wants to read the chain"), asked for
-once per site and never granted with the shard itself. The staking writes are the
+A page reaches the reads through one `chain!` verb — `chain!("block", HASH, ret)`,
+`chain!("txns", HASH, ret)` for a block's REV transfers, and so on — which is its
+own consent class ("wants to read the chain"), asked for once per site and never
+granted with the shard itself. The staking writes are the
 same shape under a second class, `stake!`: a page names an *amount*, never a key,
 so it can lock the payer's REV or stage an unbond and nothing else — it cannot
 send funds anywhere or touch another key, which is what makes exposing it

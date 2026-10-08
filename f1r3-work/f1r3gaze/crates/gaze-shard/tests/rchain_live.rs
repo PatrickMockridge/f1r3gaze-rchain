@@ -190,6 +190,65 @@ fn the_rchain_wallet_reads_and_moves_rev() {
     assert!(drops > 0, "the faucet answers a positive drip");
 }
 
+/// An address's transfer history, walked out of the node's own block reports —
+/// the same walk `f1r3gaze wallet history` runs.
+///
+/// **This needs a node that can report, and skips without one.** A block report
+/// requires a node that is *read-only*: `BlockReportApi::block_report` refuses
+/// outright when the node holds a validator identity, so a validating node —
+/// including every node `f1r3gaze devnet up` starts — answers 400 no matter how
+/// `api-server.enable-reporting` is set. Producing a read-only node on this
+/// shard means bootstrapping an observer over p2p, which the devnet launcher
+/// does not do, so what this test proves when it runs is the walk against a
+/// real observer; when it does not, it says which of the two conditions failed
+/// rather than reading as an address with no history.
+#[test]
+fn the_rchain_history_shows_a_live_transfer() {
+    let Some((base, key)) = base_and_key() else {
+        eprintln!("RCHAIN_NODE unset; skipping the live rchain history test");
+        return;
+    };
+    let b = bridge(&base, key);
+
+    // Fail fast on a node that cannot report, before spending a deploy on it.
+    // A *real* block hash, so the only thing this can fail on is the node's
+    // willingness to report.
+    let (anchor, _) = Node::new(&base, NodeDialect::Rchain, Http::new())
+        .last_finalized()
+        .expect("an anchor");
+    if let Err(e) = b.transactions(&anchor) {
+        eprintln!("skipping the live rchain history test: {e}");
+        return;
+    }
+
+    let d = b.rev_transfer(TRANSFER_TO, 1000).expect("transfer");
+    eprintln!("transfer deploy {}", d.id());
+    assert_eq!(settle(&b, &d.id()), "Finalized");
+
+    // The credit lands a block after the deploy is reported settled — the
+    // status and the report come from different places — so poll for it.
+    let t0 = Instant::now();
+    let mut found = None;
+    while t0.elapsed() < Duration::from_secs(90) {
+        let (_, h) = b.transfer_history(TRANSFER_TO, 30).expect("history");
+        if let Some(t) = h.transfers.iter().find(|t| t.to_addr == TRANSFER_TO && t.amount == 1000) {
+            eprintln!(
+                "history: read {} blocks ({} unread), {} transfers for the address",
+                h.blocks_read,
+                h.blocks_unread,
+                h.transfers.len()
+            );
+            found = Some(t.clone());
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    let t = found.expect("the transfer appears in the walked history");
+    assert!(t.block_number > 0, "the row names the block it is in");
+    assert!(!t.from_addr.is_empty(), "the row names the payer");
+    eprintln!("found #{}  {} -> {}  {}  ({})", t.block_number, t.from_addr, t.to_addr, t.amount, t.kind);
+}
+
 /// The chain and staking reads against a live node.
 #[test]
 fn the_rchain_reads_answer_a_live_node() {

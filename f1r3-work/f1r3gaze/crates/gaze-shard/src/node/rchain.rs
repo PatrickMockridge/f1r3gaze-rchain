@@ -10,6 +10,7 @@
 use super::{Node, enc};
 use crate::chain::{self, Blocks};
 use crate::deploy::SignedDeploy;
+use crate::history;
 use crate::pos;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -194,6 +195,63 @@ pub(super) fn capabilities(n: &Node) -> Result<chain::NodeCapabilities, String> 
 
 pub(super) fn shards(n: &Node) -> Result<chain::Shards, String> {
     get(n, "/api/shards", "shards")
+}
+
+/// The REV transfers in one block, from `GET /api/transactions/{hash}`.
+///
+/// The route takes a **block hash**, and needs two things of the node. Both
+/// failures are otherwise legible as the wrong thing, so both are named here:
+///
+/// - `api-server.enable-reporting` must be on, or the route is a bare **404** —
+///   which reads like a bad hash rather than a switched-off feature.
+/// - the node must **not validate** (`validator_identity_opt.is_some()` is a
+///   hard refusal in `BlockReportApi::block_report`), or it is a **400**. That
+///   one cannot be fixed by a flag: a validating node replays for consensus,
+///   not for clients, and the answer is a read-only observer on the same shard.
+pub(super) fn transactions(n: &Node, hash: &str) -> Result<Vec<history::Transfer>, String> {
+    let path = format!("/api/transactions/{}", enc(hash));
+    let (status, v) = n.call_status("GET", &path, None)?;
+    if status == 404 {
+        return Err("the node does not report transactions: set `api-server.enable-reporting = true` and restart it".into());
+    }
+    if status == 400 && v.as_str().is_some_and(|m| m.contains("read-only RNode")) {
+        return Err(
+            "this node validates, and a validating node does not report transactions: point the client at a read-only \
+             (non-validating) node on the same shard"
+                .into(),
+        );
+    }
+    // Past the role check, the report still has to be *produced*, and producing
+    // one is a replay. Nothing fills the report cache at startup, so a block the
+    // node did not report while booting is replayed on demand — and a replay
+    // installs the block's system continuations into a space that already holds
+    // them, which `RSpace::install` refuses once startup is over
+    // (`rspace/src/rspace.rs`). Measured on rnode `457671bf7`: 45 of 50
+    // consecutive blocks answer this, so the route has no working path for
+    // historical blocks on that build.
+    if status == 400 && v.as_str().is_some_and(|m| m.contains("installing can be done only on startup")) {
+        return Err(
+            "the node cannot report this block: a report is a replay, and replaying a historical block reinstalls its \
+             system continuations, which rnode refuses outside startup"
+                .into(),
+        );
+    }
+    // The one case where the replay *does* work and the route still refuses: a
+    // deploy whose replay produced no events at all is not in the node's 1/2/3
+    // mapping of a deploy's report (`node/src/web/transaction.rs`), so the whole
+    // block answers 400 — a node-side bug rather than a bad request.
+    if status == 400 && v.as_str().is_some_and(|m| m.contains("unexpected user report length")) {
+        return Err(
+            "the node could not describe a deploy in this block: it expects a deploy's report to have 1, 2 or 3 \
+             segments and refuses the block when it has none"
+                .into(),
+        );
+    }
+    if !(200..300).contains(&status) {
+        let msg = v.get("message").or_else(|| v.get("error")).map(|m| m.to_string()).unwrap_or_else(|| v.to_string());
+        return Err(format!("{} {path}: HTTP {status}: {msg}", n.base));
+    }
+    history::parse_transfers(&v)
 }
 
 // --- staking reads ---------------------------------------------------------

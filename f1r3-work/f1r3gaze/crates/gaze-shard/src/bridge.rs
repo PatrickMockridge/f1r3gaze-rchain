@@ -3,6 +3,7 @@
 use crate::chain::{self, Blocks};
 use crate::deploy::{DeployData, SignedDeploy, public_key, sign_for};
 use crate::expr::to_norm;
+use crate::history;
 use crate::keys::fresh_key;
 use crate::node::{Node, NodeDialect};
 use crate::pos;
@@ -474,6 +475,85 @@ impl Bridge {
         Ok((Rung::Node, self.reader()?.shards()?))
     }
 
+    /// The REV transfers in the block with this hash — the per-block primitive
+    /// an address history is walked out of. Graded, because a block hash *is*
+    /// the identifier the answer is a function of.
+    pub fn transactions(&self, hash: &str) -> Result<(Rung, Vec<history::Transfer>), String> {
+        self.rchain_only("transaction reads")?;
+        let (rung, v, _) = self.graded(&|o, _| o.transactions(hash))?;
+        Ok((rung, v))
+    }
+
+    /// An address's recent REV transfers, by walking the node's own block
+    /// reports.
+    ///
+    /// Head-relative, so **not** graded: the answer depends on where the chain
+    /// is, and two observers at different heads legitimately differ — the same
+    /// reason [`Bridge::blocks`] is one observer's. The walk is bounded by
+    /// [`history::HISTORY_MAX_BLOCKS`] and by the chain's own length, and the
+    /// result reports how much of it could actually be read.
+    ///
+    /// The tip is the node's **newest block**, not its finalized fringe. A
+    /// fringe is the right anchor for a *graded* read — it is what two
+    /// observers can agree on — but it lags the head, and it lags by an amount
+    /// that is the node's business rather than the caller's, so anchoring here
+    /// would leave a transfer the user just made out of its own history. This
+    /// read is deliberately one observer's; it is freshness, not agreement,
+    /// that makes it useful.
+    pub fn transfer_history(&self, addr: &str, blocks: i32) -> Result<(Rung, history::History), String> {
+        self.rchain_only("transfer history reads")?;
+        let n = self.reader()?;
+        let tip = n
+            .blocks(Blocks::Depth(1), None)?
+            .first()
+            .map(|b| b.block_number)
+            .ok_or("no blocks on this node")?;
+        let mut out = history::History {
+            transfers: Vec::new(),
+            blocks_read: 0,
+            blocks_unread: 0,
+        };
+        // The first refusal, kept so that a walk which read *nothing* can say
+        // why. "No transfers" and "no transfers in the blocks I could read" are
+        // different answers, and a walk that read none is neither: it is a
+        // failure that happens to look like an empty history.
+        let mut refused: Option<String> = None;
+        for (start, end) in history::windows(tip, blocks, history::WALK_WINDOW) {
+            let bs = match n.blocks(Blocks::Range(start, end), None) {
+                Ok(bs) => bs,
+                // A window that cannot be listed is a window of unread blocks.
+                Err(e) => {
+                    refused.get_or_insert(e);
+                    out.blocks_unread += end - start + 1;
+                    continue;
+                }
+            };
+            // The node answers a range oldest-first; the walk goes newest-first.
+            for b in bs.iter().rev() {
+                match read_block(&n, &b.block_hash) {
+                    Ok(ts) => {
+                        out.blocks_read += 1;
+                        for mut t in ts {
+                            if t.from_addr == addr || t.to_addr == addr {
+                                t.block_hash = b.block_hash.clone();
+                                t.block_number = b.block_number;
+                                out.transfers.push(t);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        refused.get_or_insert(e);
+                        out.blocks_unread += 1;
+                    }
+                }
+            }
+        }
+        if out.blocks_read == 0 && out.blocks_unread > 0 {
+            return Err(refused.unwrap_or_else(|| format!("no block in the last {blocks} could be read")));
+        }
+        Ok((Rung::Node, out))
+    }
+
     // --- staking reads (rchain only) ---------------------------------------
 
     /// The epoch, the active set and every staged withdrawal. Head-relative.
@@ -742,6 +822,24 @@ pub struct ShardService {
     watcher: bool,
 }
 
+/// One block's transfers, waiting out the rate limiter.
+///
+/// The walk is many requests against a route that shares the node's deploy
+/// limiter, so a 429 is the expected answer rather than an error worth
+/// surfacing; anything else is left for the caller to count as unread.
+fn read_block(n: &Node, hash: &str) -> Result<Vec<history::Transfer>, String> {
+    let mut attempt = 0;
+    loop {
+        match n.transactions(hash) {
+            Err(e) if crate::node::is_rate_limited(&e) && attempt < 8 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            other => return other,
+        }
+    }
+}
+
 fn ok3(rung: &str, v: Norm) -> Norm {
     Norm::tuple(vec![Norm::str("ok"), Norm::str(rung), v])
 }
@@ -946,6 +1044,7 @@ impl ShardService {
                 self.job(move |b| {
                     let r: Result<Norm, String> = match (sub.as_str(), arg.as_deref()) {
                         ("block", Some(h)) => b.block(h).map(|(r, v)| ok3(r.name(), chain::block_to_norm(&v))),
+                        ("txns", Some(h)) => b.transactions(h).map(|(r, v)| ok3(r.name(), history::transfers_to_norm(&v))),
                         ("blocks", _) => {
                             let spec = match arg.as_deref().and_then(|a| a.parse::<i32>().ok()) {
                                 Some(n) => Blocks::Depth(n.clamp(1, chain::PAGE_MAX_DEPTH)),
@@ -966,7 +1065,7 @@ impl ShardService {
                         ("bonds-delegations", Some(k)) => b.pos_delegations_native(k).map(|(r, v)| ok3(r.name(), v)),
                         // A hash-addressed read with no hash is a shape error,
                         // not a node error.
-                        ("block" | "find-deploy" | "finalized" | "delegations", None) => {
+                        ("block" | "txns" | "find-deploy" | "finalized" | "delegations", None) => {
                             return reply(err3("type", "this chain read wants a hash or a key"));
                         }
                         (other, _) => return reply(err3("type", &format!("unknown chain read {other}"))),

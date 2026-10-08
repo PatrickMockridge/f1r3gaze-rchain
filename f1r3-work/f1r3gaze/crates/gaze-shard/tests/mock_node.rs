@@ -88,6 +88,9 @@ fn mock_rchain_full(value: Value, num: i64, finalized: bool, pos_error: bool, de
     let base = format!("http://{}", l.local_addr().unwrap());
     let log: Log = Arc::default();
     let log2 = Arc::clone(&log);
+    // Per-path request counts, so the transaction route can be rate-limited
+    // for the first calls the way the real one is.
+    let rl: Arc<Mutex<std::collections::HashMap<String, u32>>> = Arc::default();
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
             let mut r = BufReader::new(s.try_clone().unwrap());
@@ -130,8 +133,43 @@ fn mock_rchain_full(value: Value, num: i64, finalized: bool, pos_error: bool, de
                 // latter, but keeping the pair adjacent keeps it obvious.
                 (200, json!({"blockInfo": block, "deploys": [deploy_info(num)]}).to_string())
             } else if path.starts_with("/api/blocks") {
-                // Covers /api/blocks, /{depth} and /{start}/{end}.
-                (200, json!([block]).to_string())
+                // Covers /api/blocks, /{depth} and /{start}/{end}. A *range* --
+                // the history walk's window -- answers a hash the transaction
+                // route rate-limits, so the walk's wait-out is exercised; a
+                // one-block range answers one the node *refuses*, which is how
+                // a walk that read nothing is reached.
+                let tail = path.trim_start_matches("/api/blocks").trim_matches('/');
+                let mut b = block.clone();
+                if let Some((a, z)) = tail.split_once('/') {
+                    b["blockHash"] = json!(if a == z { "b1val" } else { "b1rl" });
+                }
+                (200, json!([b]).to_string())
+            } else if path.starts_with("/api/transactions/") {
+                // The reporting-gated route. The hash picks the case: one ending
+                // `404` is a node with reporting off, one ending `val` is a
+                // *validating* node (which refuses outright), one ending `rl` is
+                // rate-limited twice before it answers, anything else is the
+                // fixture.
+                let hash = path.trim_start_matches("/api/transactions/").to_string();
+                if hash.ends_with("404") {
+                    (404, String::new())
+                } else if hash.ends_with("val") {
+                    (400, json!("Block report can only be executed on read-only RNode.").to_string())
+                } else if hash.ends_with("rl") {
+                    let seen = {
+                        let mut c = rl.lock().unwrap();
+                        let e = c.entry(hash.clone()).or_insert(0);
+                        *e += 1;
+                        *e
+                    };
+                    if seen <= 2 {
+                        (429, json!("deploy rate limit exceeded").to_string())
+                    } else {
+                        (200, transfers().to_string())
+                    }
+                } else {
+                    (200, transfers().to_string())
+                }
             } else if path.starts_with("/api/is-finalized/") {
                 (200, "false".to_string())
             } else if path.starts_with("/api/deploy/") {
@@ -213,6 +251,8 @@ fn mock_rchain_full(value: Value, num: i64, finalized: bool, pos_error: bool, de
             let mut s = s;
             let reason = match status {
                 400 => "Bad Request",
+                404 => "Not Found",
+                429 => "Too Many Requests",
                 500 => "Internal Server Error",
                 _ => "OK",
             };
@@ -220,6 +260,28 @@ fn mock_rchain_full(value: Value, num: i64, finalized: bool, pos_error: bool, de
         }
     });
     (base, log)
+}
+
+/// The REV transfers one block reports: a credit, a *failed* debit, and an
+/// unrelated transfer — so a filter has something to drop. `retUnforgeable` is
+/// a realistic `Par` AST and is present on purpose: the client must ignore it,
+/// not model it.
+fn transfers() -> Value {
+    let unforg = json!({"sends": [], "receives": [], "news": [],
+                        "exprs": [{"GString": "x"}], "matches": [], "unforgeables": [],
+                        "bundles": [], "connectives": [], "locally_free": null,
+                        "connective_used": false});
+    json!({"data": [
+        {"transaction": {"fromAddr": "1111bbb", "toAddr": "1111aaa", "amount": 250000000,
+                         "retUnforgeable": unforg, "failReason": null},
+         "transactionType": {"UserDeploy": {"deployId": "aa11"}}},
+        {"transaction": {"fromAddr": "1111aaa", "toAddr": "1111bbb", "amount": 100000000,
+                         "retUnforgeable": unforg, "failReason": "Insufficient funds"},
+         "transactionType": {"Refund": {"deployId": "bb22"}}},
+        {"transaction": {"fromAddr": "1111bbb", "toAddr": "1111ccc", "amount": 7,
+                         "retUnforgeable": unforg, "failReason": null},
+         "transactionType": {"UserDeploy": {"deployId": "cc33"}}}
+    ]})
 }
 
 /// The deploy metadata a block carries.
@@ -587,6 +649,86 @@ fn the_block_reads_address_the_right_routes() {
     assert!(paths.iter().any(|p| p == "/api/blocks/2/5"), "range: {paths:?}");
 }
 
+/// An address's transfers, walked out of the node's own block reports and
+/// filtered — and the walk survives the route's rate limiter.
+#[test]
+fn history_walks_the_blocks_and_filters_by_address() {
+    let (base, log) = mock_rchain(manifest(), 7, false);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let (rung, h) = br.transfer_history("1111aaa", 5).unwrap();
+    assert_eq!(rung, Rung::Node, "a walk depends on the tip, so it is one observer's");
+    // Two of the block's three transfers involve the address; the third is
+    // somebody else's business and is dropped.
+    assert_eq!(h.transfers.len(), 2, "{:?}", h.transfers);
+    assert_eq!(h.transfers[0].from_addr, "1111bbb");
+    assert_eq!(h.transfers[0].to_addr, "1111aaa");
+    assert_eq!(h.transfers[0].amount, 250000000);
+    assert_eq!(h.transfers[0].kind, "UserDeploy");
+    assert_eq!(h.transfers[0].ref_id.as_deref(), Some("aa11"));
+    // A failed debit keeps its reason, and every row names the block it is in.
+    assert_eq!(h.transfers[1].fail_reason.as_deref(), Some("Insufficient funds"));
+    for t in &h.transfers {
+        assert_eq!(t.block_number, 7);
+        assert_eq!(t.block_hash, "b1rl");
+    }
+    assert_eq!((h.blocks_read, h.blocks_unread), (1, 0));
+
+    // The walk asked for a *range* — the window the node caps — and the block
+    // it read was refused twice before it answered.
+    let paths: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+    assert!(paths.iter().any(|p| p == "/api/blocks/3/7"), "{paths:?}");
+    let asked = paths.iter().filter(|p| *p == "/api/transactions/b1rl").count();
+    assert_eq!(asked, 3, "two rate-limited attempts, then the answer: {paths:?}");
+}
+
+/// A block whose report cannot be read at all is counted, not silently dropped:
+/// "no transfers" and "no transfers *in the blocks I could read*" are different
+/// answers.
+#[test]
+fn history_reports_the_blocks_it_could_not_read() {
+    let (base, _) = mock_rchain(manifest(), 7, false);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    // The mock answers every block hash, so an address that appears in none of
+    // them is how the filter's empty result is reached...
+    let (_, none) = br.transfer_history("1111zzz", 5).unwrap();
+    assert!(none.transfers.is_empty());
+    assert_eq!(none.blocks_unread, 0, "every block was read; the address simply has none");
+
+    // ...and a node with reporting off is the 404 that has to read as advice,
+    // since "unknown block" would send the reader the wrong way.
+    let e = br.transactions("nope404").unwrap_err();
+    assert!(e.contains("api-server.enable-reporting"), "{e}");
+}
+
+/// A walk that read **no** block is a failure, not an address with no history:
+/// the two are indistinguishable from the outside unless the walk says which.
+#[test]
+fn a_walk_that_read_nothing_says_why() {
+    let (base, _) = mock_rchain(manifest(), 7, false);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    // One block, so the window is a single height — which the mock answers with
+    // a hash the node refuses.
+    let e = br.transfer_history("1111aaa", 1).unwrap_err();
+    assert!(e.contains("validates"), "the refusal itself is the message: {e}");
+    // A window that *could* be read still answers, even with nothing to show.
+    let (_, h) = br.transfer_history("1111zzz", 5).unwrap();
+    assert!(h.transfers.is_empty());
+    assert_eq!(h.blocks_read, 1);
+}
+
+/// A **validating** node refuses block reports outright, whatever reporting is
+/// set to — a node-role problem, not a configuration one, so the advice is a
+/// different node rather than a different flag. This is what the fork's own
+/// `devnet up` produces, which is why the message has to say so.
+#[test]
+fn a_validating_node_says_it_cannot_report() {
+    let (base, _) = mock_rchain(manifest(), 7, false);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let e = br.transactions("b1val").unwrap_err();
+    assert!(e.contains("validates"), "{e}");
+    assert!(e.contains("read-only"), "{e}");
+}
+
 #[test]
 fn the_rchain_staking_reads_answer() {
     let (base, _) = mock_rchain(manifest(), 10, true);
@@ -652,6 +794,9 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     assert!(br.pos_active_validators().is_err());
     assert!(br.pos_trusted().is_err());
     assert!(br.pos_delegations_native(KEY).is_err());
+    // The transaction reads, per block and as the address walk.
+    assert!(br.transactions("b1").is_err());
+    assert!(br.transfer_history("1111aaa", 5).is_err());
     assert!(br.pos_bond(1).is_err());
     assert!(br.pos_withdraw().is_err());
     assert!(br.pos_delegate(KEY, 1).is_err());
@@ -679,7 +824,7 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     // The page verbs answer the structured `unavailable`, synchronously.
     let mut svc = ShardService::new(Arc::clone(&br), "https://a.example:443", Arc::new(|| {}));
     let ret = Name::Unforgeable([9; 32]);
-    for sub in ["block", "blocks", "find-deploy", "finalized", "pool", "caps", "shards", "pos", "bonds", "validators", "trusted"] {
+    for sub in ["block", "txns", "blocks", "find-deploy", "finalized", "pool", "caps", "shards", "pos", "bonds", "validators", "trusted"] {
         svc.request("rho:gaze:shard", &[Norm::str("chain"), Norm::str(sub), Norm::eval(ret.clone())]);
     }
     for sub in ["bond", "withdraw"] {
@@ -689,7 +834,7 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
         svc.request("rho:gaze:shard", &[Norm::str(verb), Norm::str(KEY), Norm::int(1), Norm::eval(ret.clone())]);
     }
     let outs = svc.drain();
-    assert_eq!(outs.len(), 15, "one reply per chain read, stake action and delegation");
+    assert_eq!(outs.len(), 16, "one reply per chain read, stake action and delegation");
     for o in &outs {
         let ShardOut::Reply { datum, .. } = o else { panic!() };
         let t = datum.as_coll(CollKind::Tuple).unwrap();
@@ -700,7 +845,7 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     // And nothing rchain-shaped reached the wire.
     let log = vlog.lock().unwrap();
     for (path, _) in log.iter() {
-        for p in ["/api/block", "/api/blocks", "/api/v1/pos", "/api/shards", "/api/v1/deploys", "/api/v1/capabilities"] {
+        for p in ["/api/block", "/api/blocks", "/api/transactions", "/api/v1/pos", "/api/shards", "/api/v1/deploys", "/api/v1/capabilities"] {
             assert!(!path.starts_with(p), "an f1r3fly node was sent {path}");
         }
     }
