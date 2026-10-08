@@ -15,7 +15,7 @@
 use gaze_blob::{Blobs, ContentCache};
 use gaze_net::{Http, Pool};
 use gaze_shard::deploy::{DeployData, public_key, sign_for};
-use gaze_shard::{Bridge, KeyPayer, Node, NodeDialect, ShardConfig};
+use gaze_shard::{Bridge, KeyPayer, Node, NodeDialect, ShardConfig, SiteAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -264,4 +264,58 @@ fn the_rchain_delegation_writes_report_the_nodes_refusal() {
     let reason2 = b.pos_settle(&d2.id()).expect("settles").expect_err("there is nothing to withdraw");
     eprintln!("undelegate with no delegation -> {reason2}");
     assert!(reason2.contains("no delegation"), "unexpected refusal: {reason2}");
+}
+
+/// The publish round trip: publish a manifest, then read it back through this
+/// client's own resolution path.
+///
+/// That is the whole loop on rnode — the term parses, the send persists a datum
+/// on the public channel the address names, and `resolve_site` finds it again —
+/// and it is non-destructive: one new channel value, plus phlo.
+#[test]
+fn publishing_a_site_round_trips_on_a_live_node() {
+    use gaze_shard::site::manifest_for_dir;
+    let Some((base, key)) = base_and_key() else {
+        eprintln!("RCHAIN_NODE unset; skipping the live publish test");
+        return;
+    };
+    let b = bridge(&base, key);
+
+    // A one-file site, packaged from a directory.
+    let dir = std::env::temp_dir().join(format!("gaze-publish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("index.html"), b"<h1>gaze</h1>").unwrap();
+    let m = manifest_for_dir(&dir, "index.html", &["https://example.invalid/".into()]).expect("a manifest");
+
+    // A fresh address. The files are not published — only the manifest and the
+    // mirror it names — which is why this test can be a round trip at all.
+    let addr = SiteAddr::parse("f1r3://abc0def1/livetest@^1").unwrap();
+    let uri = addr.registry_uri();
+    let d = b.publish_site(&uri, &m).expect("the deploy is accepted");
+    eprintln!("publish deploy {} to {uri}", d.id());
+    b.settle(&d.id()).expect("the publish settles");
+
+    // The deploy's *status* and the *state* at a pinned block are answered from
+    // different places, and they can lag by a block: a deploy the node reports
+    // processed is not yet readable at every block the read might pin. So a
+    // publisher polls, which is what a publisher does in practice anyway.
+    let t0 = Instant::now();
+    let mut last = String::new();
+    let mut got = None;
+    while t0.elapsed() < Duration::from_secs(60) {
+        match b.resolve_site(&addr) {
+            Ok((rung, back)) => {
+                got = Some((rung, back));
+                break;
+            }
+            Err(e) => last = e,
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    let (rung, back) = got.unwrap_or_else(|| panic!("the site never resolved: {last}"));
+    eprintln!("resolved {uri} at the {} rung", rung.name());
+    assert_eq!(back, m, "what resolves is what was published");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

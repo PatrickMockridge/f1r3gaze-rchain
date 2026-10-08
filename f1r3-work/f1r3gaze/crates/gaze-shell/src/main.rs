@@ -22,6 +22,12 @@
 //!                                    on an operator it names (the rchain dialect
 //!                                    only; bond is permissioned, so an
 //!                                    unadmitted key is refused)
+//! f1r3gaze site publish DIR f1r3://<pub>/<proj>@<range>
+//!                [--entry NAME] [--mirror URL]...
+//!                                    publish a site's manifest to the shard and
+//!                                    read it back (the rchain dialect only);
+//!                                    the files go to the mirror you name, via
+//!                                    `f1r3c site`
 //! f1r3gaze --version
 //! ```
 
@@ -229,6 +235,60 @@ fn pos(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn site(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
+    use gaze_shard::SiteAddr;
+    if eng.bridge.cfg.dialect != gaze_shard::NodeDialect::Rchain {
+        return Err("site publishing is the rchain dialect's; f1r3fly publishes into its registry".into());
+    }
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    match a.first().copied().unwrap_or("") {
+        "publish" => {
+            let dir = a.get(1).copied().ok_or("site publish needs a directory")?;
+            let addr = a.get(2).copied().ok_or("site publish needs an f1r3:// address")?;
+            let sa = SiteAddr::parse(addr).ok_or_else(|| format!("{addr} is not an f1r3:// address"))?;
+            let (mut entry, mut mirrors) = ("index.html".to_string(), Vec::new());
+            let mut i = 3;
+            while let Some(x) = a.get(i) {
+                match *x {
+                    "--entry" => {
+                        i += 1;
+                        entry = a.get(i).ok_or("--entry needs a value")?.to_string();
+                    }
+                    "--mirror" => {
+                        i += 1;
+                        mirrors.push(a.get(i).ok_or("--mirror needs a value")?.to_string());
+                    }
+                    other => return Err(format!("unknown option {other}")),
+                }
+                i += 1;
+            }
+            let m = gaze_shard::site::manifest_for_dir(std::path::Path::new(dir), &entry, &mirrors)?;
+            let uri = sa.registry_uri();
+            println!("publishing {} file(s) as {uri}", m.files.len());
+            let d = eng.bridge.publish_site(&uri, &m)?;
+            println!("deploy {}", d.id());
+            // A publish sends to a channel and terminates: it has no reply to
+            // read, so this waits for the deploy rather than parsing one.
+            eng.bridge.settle(&d.id())?;
+            // Read it back. The loop only counts as closed if this client's own
+            // read path finds what it just published.
+            let (rung, back) = eng.bridge.resolve_site(&sa)?;
+            if back != m {
+                return Err(format!("the published manifest did not read back unchanged: {back:?}"));
+            }
+            println!("published {addr} ({})", rung.name());
+            if m.mirrors.is_empty() {
+                println!(
+                    "note: the manifest names no mirror, so the site will resolve and then fail to load. \
+                     Run `f1r3c site {dir} --mirror URL` for the blobs and upload them."
+                );
+            }
+            Ok(())
+        }
+        other => Err(format!("unknown site command {other}")),
+    }
+}
+
 fn wallet(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
     use gaze_wallet::Address;
     let w = &eng.wallets;
@@ -331,13 +391,14 @@ fn main() {
             "--timeout" => opts.timeout = Duration::from_secs(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
             "--log" => log = Some(args.next().unwrap_or_else(|| usage())),
             "--wait" => opts.wait = Duration::from_secs(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
-            "wallet" | "chain" | "pos" => {
+            "wallet" | "chain" | "pos" | "site" => {
                 let which = a.clone();
                 let rest: Vec<String> = args.by_ref().collect();
                 let eng = Engine::new(dir.clone());
                 let r = match which.as_str() {
                     "chain" => chain(&eng, &rest),
                     "pos" => pos(&eng, &rest),
+                    "site" => site(&eng, &rest),
                     _ => wallet(&eng, &rest),
                 };
                 if let Err(e) = r {

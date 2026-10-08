@@ -48,7 +48,27 @@ pub(super) fn registry(n: &Node, uri: &str, block: Option<&str>) -> Result<(Vec<
         "usePreStateHash": false,
     });
     let v = n.call("POST", "/api/data-at-name-by-block-hash", Some(&body))?;
-    Ok(project_block(&v))
+    let (data, h, num) = project_block(&v);
+    // A public channel **accumulates**: every send leaves a datum, so a site
+    // republished unchanged answers with N identical copies. Identical copies
+    // are one answer and collapse to one -- without this, a second publish
+    // turns the answer into a *list* and the manifest stops parsing, which is
+    // exactly what a re-publish must not do.
+    //
+    // Distinct values at one name are a different matter: the address no longer
+    // identifies one thing, so this refuses rather than silently picking one.
+    // A publisher changing a site's content gives it a new range
+    // (`@^1` -> `@^2`), which is what the range field is for.
+    let mut unique: Vec<Value> = Vec::new();
+    for d in data {
+        if !unique.iter().any(|u| u == &d) {
+            unique.push(d);
+        }
+    }
+    if unique.len() > 1 {
+        return Err(format!("{uri} holds {} different values; publish a changed site under a new range", unique.len()));
+    }
+    Ok((unique, h, num))
 }
 
 /// An exploratory deploy at `block`'s post-state: `(values on return, block

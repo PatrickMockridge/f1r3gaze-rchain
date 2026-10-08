@@ -29,6 +29,10 @@ f1r3gaze pos status | delegations KEY | bonds | validators | trusted
                                              [--json]
                                     read the chain and its staking state
                                     (the rchain dialect only)
+f1r3gaze site publish DIR f1r3://<pub>/<proj>@<range>
+               [--entry NAME] [--mirror URL]...
+                                    publish a site's manifest to the shard and
+                                    read it back (the rchain dialect only)
 
 f1r3c compile app.rho [-o app.knf] [--level k1g] [--import IDENT=URN]...
 f1r3c inspect app.knf               manifest, hashes, program text
@@ -189,7 +193,7 @@ Three defects in the existing code were found and fixed on the way:
 
 ## Tests
 
-103 tests in this workspace, all passing — five of them env-gated live tests
+107 tests in this workspace, all passing — six of them env-gated live tests
 against a running `rnode` (CampF1R3 carries its own 181):
 
 | crate | tests | what they establish |
@@ -288,6 +292,7 @@ node:
 | staking reads | — (no counterpart) | `/api/v1/pos`, `/api/v1/pos/delegations`, and the read-only `rho:rchain:pos` methods |
 | staking writes | — (no counterpart) | `bond` / `withdraw` through the native `rho:rchain:pos`, on the payer's own key |
 | delegation | — (no counterpart) | `delegate` / `undelegate` on a **named** operator, through the native `rho:rchain:pos` |
+| site publishing | `rho:registry:insertSigned` | `@"rho:serve:1:…"!(manifest)`, one deploy |
 
 Two things are lost on rchain, and are dialect-scoped rather than papered over:
 
@@ -325,6 +330,19 @@ separately and the prompt says whose keys are in play. A refusal is not a
 failure: the deploy succeeds and the program
 declines, so the node's reason is read back from the deploy's own
 `rho:rchain:deployId` and reported as `("err", "refused", reason)`.
+
+**Publishing a site** is the other half of the same seam. On f1r3fly a manifest
+lives in the registry; on rchain it is data on the public channel its address
+names, so `f1r3gaze site publish DIR f1r3://<pub>/<proj>@<range>` deploys the one
+send that puts it there and then reads it back. **The address is portable** —
+`rho:serve:1:…` is the registry URI on one dialect and the channel name on the
+other — but a site published on f1r3fly must be **re-published** on rchain, since
+the writer differs even though the address does not. The *files* are not
+published: the manifest names the mirrors that carry them, so run
+`f1r3c site DIR --mirror URL` and upload the blobs, or the site will resolve and
+then fail to load. A channel accumulates, so re-publishing unchanged content is
+harmless (identical copies are one answer) while re-publishing *changed* content
+at one address is refused — a changed site takes a new range (`@^1` to `@^2`).
 
 Proven live: `crates/gaze-shard/tests/rchain_live.rs` deploys a program this
 crate signs against a running `rnode` and checks the node's reported deploy id

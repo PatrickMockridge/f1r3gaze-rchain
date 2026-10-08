@@ -228,7 +228,16 @@ fn bridge(observers: Vec<String>, validator: String, dir: &str) -> Arc<Bridge> {
 
 /// A bridge on one dialect, with the fixed test payer.
 fn bridge_dialect(dialect: NodeDialect, observers: Vec<String>, validator: String) -> Arc<Bridge> {
-    let d = std::env::temp_dir().join(format!("gaze-shard-{}-{}", dialect.name(), std::process::id()));
+    // A per-call directory: several tests build rchain bridges in one process,
+    // and a shared path means one test removes the cache another is writing.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let d = std::env::temp_dir().join(format!(
+        "gaze-shard-{}-{}-{}",
+        dialect.name(),
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     let _ = std::fs::remove_dir_all(&d);
     let blobs = Arc::new(Blobs::new(ContentCache::new(d.join("blobs"), 1 << 20), Http::new()));
     Bridge::new(
@@ -617,6 +626,13 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     assert!(br.pos_delegate(KEY, 1).is_err());
     assert!(br.pos_undelegate(KEY).is_err());
     assert!(br.pos_settle("x").is_err());
+    // Publishing is rchain-only too: f1r3fly puts a manifest in its registry.
+    let site = SiteManifest {
+        entry: "index.html".into(),
+        files: std::collections::BTreeMap::new(),
+        mirrors: Vec::new(),
+    };
+    assert!(br.publish_site("rho:serve:1:ab:p:^1", &site).is_err());
     // The wallet's balance read was ungated before this change and would have
     // shipped a term naming `rho:rchain:revVault` to an f1r3fly node.
     assert!(br.rev_balance(KEY).is_err());
@@ -712,4 +728,54 @@ fn a_delegation_settles_on_its_result() {
     assert!(br.pos_delegate("zz", 1).unwrap_err().contains("hex"));
     assert!(br.pos_delegate("04aa", 1).unwrap_err().contains("65 bytes"));
     assert!(br.pos_undelegate("04aa").unwrap_err().contains("65 bytes"));
+}
+
+/// Publishing: the deploy body *is* the publication, so it is the assertion.
+#[test]
+fn publishing_a_site_sends_the_manifest_to_its_channel() {
+    use std::collections::BTreeMap;
+    let (base, vlog) = mock_rchain(manifest(), 10, true);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let hash = gaze_net::digest(b"<h1>hi</h1>");
+    let mut files = BTreeMap::new();
+    files.insert("index.html".to_string(), hash);
+    let m = SiteManifest {
+        entry: "index.html".into(),
+        files,
+        mirrors: vec!["https://m/".into()],
+    };
+
+    let d = br.publish_site("rho:serve:1:abcd:todo:^1", &m).expect("accepted");
+    // A publish has no reply to read -- it sends to a channel and terminates.
+    br.settle(&d.id()).unwrap();
+
+    let body = vlog.lock().unwrap().iter().find(|(p, _)| p == "/api/deploy").cloned().unwrap().1;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let term = v["data"]["term"].as_str().unwrap();
+    // The one send that publishes: manifest data on the public channel the
+    // site's address names.
+    assert!(term.starts_with("@\"rho:serve:1:abcd:todo:^1\"!("), "{term}");
+    assert!(term.contains("\"gaze\": 1"), "{term}");
+    assert!(term.contains(&gaze_net::hex(&hash)), "the file hash is carried: {term}");
+    assert!(term.contains("\"mirrors\": [\"https://m/\"]"), "{term}");
+    assert!(!term.contains("0x"), "a hash is a hex string, not a byte literal: {term}");
+    assert_eq!(v["data"]["shardId"], "/root");
+    assert!(v["data"].get("expiration_timestamp").is_none(), "rchain omits field 13");
+
+    // And the publish deploy verifies under the rchain preimage.
+    let sd = SignedDeploy {
+        data: DeployData {
+            term: term.to_string(),
+            timestamp: v["data"]["timestamp"].as_i64().unwrap(),
+            phlo_price: v["data"]["phloPrice"].as_i64().unwrap(),
+            phlo_limit: v["data"]["phloLimit"].as_i64().unwrap(),
+            valid_after_block_number: v["data"]["validAfterBlockNumber"].as_i64().unwrap(),
+            shard_id: v["data"]["shardId"].as_str().unwrap().into(),
+            expiration_timestamp: None,
+        },
+        deployer: gaze_net::unhex(v["deployer"].as_str().unwrap()).unwrap(),
+        sig: gaze_net::unhex(v["signature"].as_str().unwrap()).unwrap(),
+        dialect: NodeDialect::Rchain,
+    };
+    assert!(verify(&sd), "the publish deploy verifies");
 }

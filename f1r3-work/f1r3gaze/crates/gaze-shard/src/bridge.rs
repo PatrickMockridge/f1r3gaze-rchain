@@ -564,9 +564,56 @@ impl Bridge {
         self.sign_and_deploy(&key, &term, pos::STAKE_PHLO_LIMIT)
     }
 
+    /// Publish a site manifest: one deploy that sends it to the public channel
+    /// the site's address names.
+    ///
+    /// rchain only. f1r3fly keeps a manifest in its registry
+    /// (`rho:registry:insertSigned`), which is a different mechanism and is not
+    /// wired here either — so this is a refusal, not a regression.
+    ///
+    /// The site's **files** are not published: the manifest names the mirrors
+    /// that carry them. A site whose blobs are not on a reachable mirror
+    /// resolves and then fails to load, which is the honest failure.
+    pub fn publish_site(&self, uri: &str, m: &SiteManifest) -> Result<SignedDeploy, String> {
+        self.rchain_only("site publishing")?;
+        let (key, _) = self.payer.payer()?;
+        let term = crate::site::publish_term(uri, m);
+        self.sign_and_deploy(&key, &term, crate::site::PUBLISH_PHLO_LIMIT)
+    }
+
     /// A deploy's outcome, including the value it produced.
     pub fn deploy_outcome(&self, id: &str) -> Result<chain::DeployOutcome, String> {
         self.validator().deploy_outcome(id)
+    }
+
+    /// Wait for a deploy to settle and return its outcome.
+    ///
+    /// `Err` here is a *failed* deploy or a timeout — deliberately **not** a
+    /// refusal, which is a successful deploy whose program declined.
+    fn settle_outcome(&self, id: &str) -> Result<chain::DeployOutcome, String> {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(120) {
+            let o = self.deploy_outcome(id)?;
+            match o.state.as_str() {
+                "Pending" => std::thread::sleep(Duration::from_secs(3)),
+                "Failed" => {
+                    return Err(o.error.unwrap_or_else(|| "the deploy failed, with no reason given".into()));
+                }
+                _ => return Ok(o),
+            }
+        }
+        Err(format!("deploy {id} did not settle within 120 s"))
+    }
+
+    /// Wait for a deploy that only *does* something to settle: `Ok(())` once it
+    /// is included and ran.
+    ///
+    /// Use this for a deploy with no reply to read — a site publish sends to a
+    /// channel and terminates, so it produces nothing on its `deployId`. Asking
+    /// [`Self::pos_settle`] to parse one would report "answered nothing" on a
+    /// success.
+    pub fn settle(&self, id: &str) -> Result<(), String> {
+        self.settle_outcome(id).map(|_| ())
     }
 
     /// Wait for a write to settle and report **what the chain said**: `Ok(())`
@@ -578,18 +625,7 @@ impl Bridge {
     /// them would make "the bond was refused" read like "the request broke".
     pub fn pos_settle(&self, id: &str) -> Result<Result<(), String>, String> {
         self.rchain_only("staking writes")?;
-        let t0 = Instant::now();
-        while t0.elapsed() < Duration::from_secs(120) {
-            let o = self.deploy_outcome(id)?;
-            match o.state.as_str() {
-                "Pending" => std::thread::sleep(Duration::from_secs(3)),
-                "Failed" => {
-                    return Err(o.error.unwrap_or_else(|| "the deploy failed, with no reason given".into()));
-                }
-                _ => return Ok(pos::reply_from(&o.result)),
-            }
-        }
-        Err(format!("deploy {id} did not settle within 120 s"))
+        Ok(pos::reply_from(&self.settle_outcome(id)?.result))
     }
 }
 
