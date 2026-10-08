@@ -1,0 +1,3 @@
+# Rust build output. The cargo workspace is f1r3-work/f1r3gaze/, so its
+# target/ is a few levels down; `target/` matches it at any depth.
+target/
