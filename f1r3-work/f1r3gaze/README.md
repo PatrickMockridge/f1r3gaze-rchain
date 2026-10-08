@@ -192,7 +192,7 @@ Three defects in the existing code were found and fixed on the way:
 
 ## Tests
 
-107 tests in this workspace, all passing — six of them env-gated live tests
+110 tests in this workspace, all passing — six of them env-gated live tests
 against a running `rnode` (CampF1R3 carries its own 181):
 
 | crate | tests | what they establish |
@@ -289,7 +289,7 @@ node:
 | staking reads | — (no counterpart) | `/api/v1/pos`, `/api/v1/pos/delegations`, and the read-only `rho:rchain:pos` methods |
 | staking writes | — (no counterpart) | `bond` / `withdraw` through the native `rho:rchain:pos`, on the payer's own key |
 | delegation | — (no counterpart) | `delegate` / `undelegate` on a **named** operator, through the native `rho:rchain:pos` |
-| site publishing | `rho:registry:insertSigned` | `@"rho:serve:1:…"!(manifest)`, one deploy |
+| site publishing | `rho:registry:insertSigned` | `@"rho:serve:1:…"!(manifest)` plus the files in F1R3Drive's on-chain layout, as deploys |
 
 Two things are lost on rchain, and are dialect-scoped rather than papered over:
 
@@ -334,10 +334,13 @@ names, so `f1r3gaze site publish DIR f1r3://<pub>/<proj>@<range>` deploys the on
 send that puts it there and then reads it back. **The address is portable** —
 `rho:serve:1:…` is the registry URI on one dialect and the channel name on the
 other — but a site published on f1r3fly must be **re-published** on rchain, since
-the writer differs even though the address does not. The *files* are not
-published: the manifest names the mirrors that carry them, so run
-`f1r3c site DIR --mirror URL` and upload the blobs, or the site will resolve and
-then fail to load. A channel accumulates, so re-publishing unchanged content is
+the writer differs even though the address does not. The site's **files** go
+on-chain too, in F1R3Drive's layout under the root this client's own reader
+watches, so a published site needs no mirror — and the command ends by fetching
+the entry back through that path, so it fails unless the site actually *loads*.
+Files over 256 KiB still need a mirror: the layout caps there, and a truncated
+blob would pass its own hash check. A channel accumulates, so re-publishing
+unchanged content is
 harmless (identical copies are one answer) while re-publishing *changed* content
 at one address is refused — a changed site takes a new range (`@^1` to `@^2`).
 

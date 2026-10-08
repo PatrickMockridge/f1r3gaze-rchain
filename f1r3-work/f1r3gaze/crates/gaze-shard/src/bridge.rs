@@ -571,14 +571,27 @@ impl Bridge {
     /// (`rho:registry:insertSigned`), which is a different mechanism and is not
     /// wired here either — so this is a refusal, not a regression.
     ///
-    /// The site's **files** are not published: the manifest names the mirrors
-    /// that carry them. A site whose blobs are not on a reachable mirror
-    /// resolves and then fails to load, which is the honest failure.
+    /// The manifest is what makes the address resolve; [`Self::publish_blobs`]
+    /// is what makes the site *load*, and a site with neither a mirror nor
+    /// published blobs resolves and then fails.
     pub fn publish_site(&self, uri: &str, m: &SiteManifest) -> Result<SignedDeploy, String> {
         self.rchain_only("site publishing")?;
         let (key, _) = self.payer.payer()?;
         let term = crate::site::publish_term(uri, m);
         self.sign_and_deploy(&key, &term, crate::site::PUBLISH_PHLO_LIMIT)
+    }
+
+    /// Publish files on-chain in F1R3Drive's layout, under the root this
+    /// client's own reader watches — so a published site needs no mirror.
+    ///
+    /// One deploy carries every file as a parallel send. A file over the
+    /// reader's limit is refused with a reason rather than truncated, because a
+    /// truncated blob would pass its hash check and serve wrong content.
+    pub fn publish_blobs(&self, files: &[([u8; 32], Vec<u8>)]) -> Result<SignedDeploy, String> {
+        self.rchain_only("site publishing")?;
+        let (key, _) = self.payer.payer()?;
+        let term = crate::site::blobs_term(files)?;
+        self.sign_and_deploy(&key, &term, crate::site::BLOB_PHLO_LIMIT)
     }
 
     /// A deploy's outcome, including the value it produced.

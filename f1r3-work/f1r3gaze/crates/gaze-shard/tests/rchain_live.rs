@@ -36,10 +36,12 @@ fn base_and_key() -> Option<(String, k256::ecdsa::SigningKey)> {
 }
 
 fn bridge(base: &str, key: k256::ecdsa::SigningKey) -> Arc<Bridge> {
-    let dir = std::env::temp_dir().join(format!("gaze-rchain-live-{}", std::process::id()));
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("gaze-rchain-live-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&dir);
     let blobs = Arc::new(Blobs::new(ContentCache::new(dir.join("blobs"), 1 << 20), Http::new()));
-    Bridge::new(
+    let b = Bridge::new(
         ShardConfig {
             dialect: NodeDialect::Rchain,
             observers: vec![base.to_string()],
@@ -50,8 +52,16 @@ fn bridge(base: &str, key: k256::ecdsa::SigningKey) -> Arc<Bridge> {
         Http::new(),
         Pool::new(2),
         Arc::new(KeyPayer { key, address: RECIPIENT.into() }),
-        blobs,
-    )
+        Arc::clone(&blobs),
+    );
+    // The on-chain blob source, registered exactly as the shell registers it —
+    // so a published site's files are fetched through this client's own path
+    // and not read back out of the directory they came from.
+    blobs.add_source(Arc::new(gaze_shard::DriveSource {
+        bridge: Arc::clone(&b),
+        root: gaze_shard::site::DRIVE_ROOT.into(),
+    }));
+    b
 }
 
 /// Wait for a deploy to leave `Pending`, returning its terminal state.
@@ -286,11 +296,19 @@ fn publishing_a_site_round_trips_on_a_live_node() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("index.html"), b"<h1>gaze</h1>").unwrap();
-    let m = manifest_for_dir(&dir, "index.html", &["https://example.invalid/".into()]).expect("a manifest");
+    // No mirror on purpose: the bytes must come from the chain, or this proves
+    // nothing about the blobs publish.
+    let m = manifest_for_dir(&dir, "index.html", &[]).expect("a manifest");
 
-    // A fresh address. The files are not published — only the manifest and the
-    // mirror it names — which is why this test can be a round trip at all.
-    let addr = SiteAddr::parse("f1r3://abc0def1/livetest@^1").unwrap();
+    // A fresh address every run, and not for tidiness: a channel accumulates,
+    // and publishing *different* content at an address that already holds a
+    // manifest is refused (asserted at the end). A changed site takes a new
+    // address, which is what the range field is for.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let addr = SiteAddr::parse(&format!("f1r3://abc0def1/livetest{stamp}@^1")).unwrap();
     let uri = addr.registry_uri();
     let d = b.publish_site(&uri, &m).expect("the deploy is accepted");
     eprintln!("publish deploy {} to {uri}", d.id());
@@ -316,6 +334,33 @@ fn publishing_a_site_round_trips_on_a_live_node() {
     let (rung, back) = got.unwrap_or_else(|| panic!("the site never resolved: {last}"));
     eprintln!("resolved {uri} at the {} rung", rung.name());
     assert_eq!(back, m, "what resolves is what was published");
+
+    // The manifest makes it *resolve*; the blobs make it *load*. Publish the
+    // files on-chain in the reader's layout and then fetch the entry through
+    // this client's own blob path.
+    let files: Vec<([u8; 32], Vec<u8>)> = m
+        .files
+        .iter()
+        .map(|(n, h)| (*h, std::fs::read(dir.join(n)).unwrap()))
+        .collect();
+    let bd = b.publish_blobs(&files).expect("the blobs deploy is accepted");
+    eprintln!("blobs deploy {}", bd.id());
+    b.settle(&bd.id()).expect("the blobs settle");
+
+    let (name, bytes) = b.site_file(&back, "").expect("the entry loads from the chain");
+    eprintln!("loaded {name}, {} bytes", bytes.len());
+    assert_eq!(name, "index.html");
+    assert_eq!(bytes, b"<h1>gaze</h1>", "the bytes came back off the chain");
+
+    // And a *changed* manifest at one address is refused rather than silently
+    // picked, which is the other half of the accumulation rule.
+    let mut changed = m.clone();
+    changed.mirrors = vec!["https://elsewhere.invalid/".into()];
+    let cd = b.publish_site(&uri, &changed).expect("the deploy is accepted");
+    b.settle(&cd.id()).expect("it settles");
+    let e = b.resolve_site(&addr).expect_err("two different manifests at one address");
+    eprintln!("changed manifest refused: {e}");
+    assert!(e.contains("different values"), "{e}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

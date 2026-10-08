@@ -262,27 +262,37 @@ fn site(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
                 }
                 i += 1;
             }
-            let m = gaze_shard::site::manifest_for_dir(std::path::Path::new(dir), &entry, &mirrors)?;
+            let (m, files) = gaze_shard::site::package_dir(std::path::Path::new(dir), &entry, &mirrors)?;
             let uri = sa.registry_uri();
             println!("publishing {} file(s) as {uri}", m.files.len());
+
+            // The manifest makes the address resolve; the blobs make the site
+            // load. Both are deploys that send and terminate, so this waits for
+            // each rather than parsing a reply.
             let d = eng.bridge.publish_site(&uri, &m)?;
-            println!("deploy {}", d.id());
-            // A publish sends to a channel and terminates: it has no reply to
-            // read, so this waits for the deploy rather than parsing one.
+            println!("manifest deploy {}", d.id());
             eng.bridge.settle(&d.id())?;
-            // Read it back. The loop only counts as closed if this client's own
-            // read path finds what it just published.
+
+            if !files.is_empty() {
+                let blobs: Vec<([u8; 32], Vec<u8>)> = files
+                    .iter()
+                    .map(|(name, bytes)| {
+                        m.files.get(name).copied().map(|h| (h, bytes.clone())).ok_or_else(|| format!("{name}: no hash"))
+                    })
+                    .collect::<Result<_, String>>()?;
+                let bd = eng.bridge.publish_blobs(&blobs)?;
+                println!("blobs deploy {}", bd.id());
+                eng.bridge.settle(&bd.id())?;
+            }
+
+            // Read it back, and *load* it: the loop is only closed if this
+            // client's own read path finds the manifest and then the file.
             let (rung, back) = eng.bridge.resolve_site(&sa)?;
             if back != m {
                 return Err(format!("the published manifest did not read back unchanged: {back:?}"));
             }
-            println!("published {addr} ({})", rung.name());
-            if m.mirrors.is_empty() {
-                println!(
-                    "note: the manifest names no mirror, so the site will resolve and then fail to load. \
-                     Run `f1r3c site {dir} --mirror URL` for the blobs and upload them."
-                );
-            }
+            let (name, bytes) = eng.bridge.site_file(&back, "")?;
+            println!("published {addr} ({}) — {name}, {} bytes", rung.name(), bytes.len());
             Ok(())
         }
         other => Err(format!("unknown site command {other}")),

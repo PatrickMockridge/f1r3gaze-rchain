@@ -633,6 +633,7 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
         mirrors: Vec::new(),
     };
     assert!(br.publish_site("rho:serve:1:ab:p:^1", &site).is_err());
+    assert!(br.publish_blobs(&[([0u8; 32], b"x".to_vec())]).is_err());
     // The wallet's balance read was ungated before this change and would have
     // shipped a term naming `rho:rchain:revVault` to an f1r3fly node.
     assert!(br.rev_balance(KEY).is_err());
@@ -778,4 +779,27 @@ fn publishing_a_site_sends_the_manifest_to_its_channel() {
         dialect: NodeDialect::Rchain,
     };
     assert!(verify(&sd), "the publish deploy verifies");
+}
+
+/// The blobs publish: the body carries F1R3Drive's on-chain layout, at the root
+/// this client's own reader watches.
+#[test]
+fn publishing_blobs_writes_the_reader_layout() {
+    let (base, vlog) = mock_rchain(manifest(), 10, true);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let hash = gaze_net::digest(b"hi");
+    let d = br.publish_blobs(&[(hash, b"hi".to_vec())]).expect("accepted");
+    br.settle(&d.id()).unwrap();
+
+    let body = vlog.lock().unwrap().iter().find(|(p, _)| p == "/api/deploy").cloned().unwrap().1;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    let term = v["data"]["term"].as_str().unwrap();
+    assert!(term.starts_with(&format!("@\"{}{}", gaze_shard::site::DRIVE_ROOT, gaze_net::hex(&hash))), "{term}");
+    assert!(term.contains("\"firstChunk\": \"6869\".hexToBytes()"), "{term}");
+    assert!(!term.contains("0x"), "rnode's parser rejects the 0x spelling: {term}");
+    assert_eq!(v["data"]["shardId"], "/root");
+
+    // A file over the reader's limit is refused before any deploy is built.
+    let big = vec![0u8; gaze_shard::bridge::DRIVE_MAX + 1];
+    assert!(br.publish_blobs(&[([0u8; 32], big)]).unwrap_err().contains("at most"));
 }

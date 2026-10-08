@@ -14,6 +14,11 @@ use std::path::Path;
 /// reduction steps.
 pub const PUBLISH_PHLO_LIMIT: i64 = 1_000_000;
 
+/// The phlo a blob publish is allowed to spend. Generous on purpose: a
+/// `phlo_limit` is a *cap*, not a charge — the node bills the actual cost — so
+/// the only thing a low limit buys is a failed deploy on a large site.
+pub const BLOB_PHLO_LIMIT: i64 = 10_000_000;
+
 /// Escape a channel name for a rholang string literal. A project or range comes
 /// from the address and may hold anything, so it is escaped rather than trusted.
 fn esc(s: &str) -> String {
@@ -57,23 +62,39 @@ pub fn publish_term(uri: &str, m: &SiteManifest) -> String {
 
 /// The manifest for a directory: every file hashed, dotfiles skipped (as
 /// `f1r3c site` does), and the entry required to be one of them.
-///
-/// The *files* are not published here — only their hashes and, through the
-/// manifest, the mirrors that carry them.
 pub fn manifest_for_dir(dir: &Path, entry: &str, mirrors: &[String]) -> Result<SiteManifest, String> {
+    package_dir(dir, entry, mirrors).map(|(m, _)| m)
+}
+
+/// A packaged site: the manifest, and each file's bytes.
+pub type Packed = (SiteManifest, Vec<(String, Vec<u8>)>);
+
+/// The manifest **and** each file's bytes, so a caller that publishes the files
+/// too does not read the tree twice — and so the bytes it publishes are the ones
+/// the manifest's hashes were taken over.
+pub fn package_dir(dir: &Path, entry: &str, mirrors: &[String]) -> Result<Packed, String> {
     let mut files = BTreeMap::new();
-    walk(dir, "", &mut files)?;
+    let mut blobs = Vec::new();
+    walk(dir, "", &mut files, &mut blobs)?;
     if !files.contains_key(entry) {
         return Err(format!("the entry {entry} is not in {}", dir.display()));
     }
-    Ok(SiteManifest {
-        entry: entry.to_string(),
-        files,
-        mirrors: mirrors.to_vec(),
-    })
+    Ok((
+        SiteManifest {
+            entry: entry.to_string(),
+            files,
+            mirrors: mirrors.to_vec(),
+        },
+        blobs,
+    ))
 }
 
-fn walk(dir: &Path, prefix: &str, out: &mut BTreeMap<String, [u8; 32]>) -> Result<(), String> {
+fn walk(
+    dir: &Path,
+    prefix: &str,
+    out: &mut BTreeMap<String, [u8; 32]>,
+    blobs: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
     let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for e in rd {
         let e = e.map_err(|e| e.to_string())?;
@@ -84,13 +105,52 @@ fn walk(dir: &Path, prefix: &str, out: &mut BTreeMap<String, [u8; 32]>) -> Resul
         let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
         let p = e.path();
         if e.file_type().map_err(|e| e.to_string())?.is_dir() {
-            walk(&p, &rel, out)?;
+            walk(&p, &rel, out, blobs)?;
         } else {
             let b = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            out.insert(rel, gaze_net::digest(&b));
+            out.insert(rel.clone(), gaze_net::digest(&b));
+            blobs.push((rel, b));
         }
     }
     Ok(())
+}
+
+/// The on-chain blob root. The reader (`bridge::DriveSource`) is registered with
+/// the same root, and reads under it with exploratory deploys that peek.
+pub const DRIVE_ROOT: &str = "/gaze-blob/";
+
+/// The deploy term that stores files on-chain in F1R3Drive's layout — the one
+/// the existing reader already knows how to fetch, so a published site needs no
+/// mirror at all.
+///
+/// Bytes are spelled `"<hex>".hexToBytes()`, and that is forced rather than
+/// chosen: the CampF1R3 printer renders a byte array as `0x…`, but **rnode's
+/// parser rejects that spelling** (`expected RParen, got Ident("x6869")`), so a
+/// term built with `show` over `Norm::bytes` would not run here at all. A list
+/// of integers parses but the reader's `bytes_of` does not accept it. `hexToBytes`
+/// is the one spelling that both parses on this node and lands as a real
+/// `ByteArray` — it is what the reference wallet already uses for a 65-byte key.
+///
+/// Files are capped at the reader's own limit; a larger file still needs a mirror.
+pub fn blobs_term(files: &[([u8; 32], Vec<u8>)]) -> Result<String, String> {
+    let mut sends = Vec::with_capacity(files.len());
+    for (h, b) in files {
+        if b.len() > crate::bridge::DRIVE_MAX {
+            return Err(format!(
+                "{} is {} bytes; the on-chain layout holds at most {} — serve it from a mirror instead",
+                gaze_net::hex(h),
+                b.len(),
+                crate::bridge::DRIVE_MAX
+            ));
+        }
+        sends.push(format!(
+            "@\"{root}{h}\"!({{\"type\": \"f\", \"firstChunk\": \"{b}\".hexToBytes(), \"otherChunks\": {{}}}})",
+            root = DRIVE_ROOT,
+            h = gaze_net::hex(h),
+            b = gaze_net::hex(b)
+        ));
+    }
+    Ok(sends.join(" | "))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +318,47 @@ mod tests {
 
         // An entry that is not there is refused before anything is published.
         assert!(manifest_for_dir(&dir, "missing.html", &[]).unwrap_err().contains("not in"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_blobs_term_writes_the_layout_the_reader_fetches() {
+        let t = blobs_term(&[([0x22u8; 32], b"hi".to_vec())]).unwrap();
+        let h = gaze_net::hex(&[0x22u8; 32]);
+        // The reader peeks at exactly this name under this root.
+        assert!(t.starts_with(&format!("@\"{DRIVE_ROOT}{h}\"!(")), "{t}");
+        assert!(t.contains("\"type\": \"f\""), "{t}");
+        // The one spelling that both parses on rnode and lands as a ByteArray.
+        assert!(t.contains("\"firstChunk\": \"6869\".hexToBytes()"), "{t}");
+        assert!(t.contains("\"otherChunks\": {}"), "{t}");
+        // `0x…` is what the CampF1R3 printer emits for bytes, and rnode's
+        // parser rejects it, so it must not appear.
+        assert!(!t.contains("0x"), "{t}");
+
+        // Several files ride one deploy, as parallel sends.
+        let two = blobs_term(&[([1u8; 32], b"a".to_vec()), ([2u8; 32], b"b".to_vec())]).unwrap();
+        assert_eq!(two.matches("!({").count(), 2, "{two}");
+
+        // A file over the reader's limit is refused rather than truncated — a
+        // truncated blob would still pass its own hash check.
+        let big = vec![0u8; crate::bridge::DRIVE_MAX + 1];
+        let e = blobs_term(&[([3u8; 32], big)]).unwrap_err();
+        assert!(e.contains("at most"), "{e}");
+    }
+
+    #[test]
+    fn package_dir_returns_the_bytes_its_hashes_were_taken_over() {
+        let dir = std::env::temp_dir().join(format!("gaze-pkg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), b"hi").unwrap();
+        let (m, blobs) = package_dir(&dir, "index.html", &[]).unwrap();
+        assert_eq!(blobs.len(), 1);
+        assert_eq!(blobs[0].0, "index.html");
+        assert_eq!(blobs[0].1, b"hi");
+        // The bytes are the ones the manifest's hash was taken over, which is
+        // what lets a publisher upload them without re-reading the tree.
+        assert_eq!(gaze_net::digest(&blobs[0].1), m.files["index.html"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
