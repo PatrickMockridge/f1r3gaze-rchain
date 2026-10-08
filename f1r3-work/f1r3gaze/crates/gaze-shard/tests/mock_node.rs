@@ -614,6 +614,8 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     assert!(br.pos_delegations_native(KEY).is_err());
     assert!(br.pos_bond(1).is_err());
     assert!(br.pos_withdraw().is_err());
+    assert!(br.pos_delegate(KEY, 1).is_err());
+    assert!(br.pos_undelegate(KEY).is_err());
     assert!(br.pos_settle("x").is_err());
     // The wallet's balance read was ungated before this change and would have
     // shipped a term naming `rho:rchain:revVault` to an f1r3fly node.
@@ -628,8 +630,11 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     for sub in ["bond", "withdraw"] {
         svc.request("rho:gaze:shard", &[Norm::str("stake"), Norm::str(sub), Norm::int(1), Norm::eval(ret.clone())]);
     }
+    for verb in ["delegate", "undelegate"] {
+        svc.request("rho:gaze:shard", &[Norm::str(verb), Norm::str(KEY), Norm::int(1), Norm::eval(ret.clone())]);
+    }
     let outs = svc.drain();
-    assert_eq!(outs.len(), 13, "one reply per chain read and per stake action");
+    assert_eq!(outs.len(), 15, "one reply per chain read, stake action and delegation");
     for o in &outs {
         let ShardOut::Reply { datum, .. } = o else { panic!() };
         let t = datum.as_coll(CollKind::Tuple).unwrap();
@@ -675,4 +680,36 @@ fn a_pos_write_settles_on_its_result_not_its_status() {
         Err("User is not bonded".to_string()),
         "the node's own words reach the caller"
     );
+}
+
+/// The delegation writes settle on their result like the others, and the
+/// operator key they **name** is the thing worth pinning.
+#[test]
+fn a_delegation_settles_on_its_result() {
+    let ok = json!([{"ExprTuple": {"data": [{"ExprBool": {"data": true}}]}}]);
+    let (base, vlog) = mock_rchain_full(manifest(), 10, true, false, ok);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let d = br.pos_delegate(KEY, 5_000).expect("accepted");
+    assert_eq!(br.pos_settle(&d.id()).unwrap(), Ok(()));
+
+    let refused = json!([{"ExprTuple": {"data": [
+        {"ExprBool": {"data": false}},
+        {"ExprString": {"data": "The operator is not bonded: only a pooled key can carry delegated stake."}}
+    ]}}]);
+    let (base2, _) = mock_rchain_full(manifest(), 10, true, false, refused);
+    let br2 = bridge_dialect(NodeDialect::Rchain, vec![base2.clone()], base2);
+    let d2 = br2.pos_undelegate(KEY).expect("accepted");
+    assert!(
+        br2.pos_settle(&d2.id()).unwrap().unwrap_err().contains("not bonded"),
+        "the node's reason reaches the caller"
+    );
+
+    // The operator key is in the term that went out...
+    let body = vlog.lock().unwrap().iter().find(|(p, _)| p == "/api/deploy").cloned().unwrap().1;
+    assert!(body.contains(KEY), "the operator key is named in the term");
+    assert!(body.contains("delegate"), "{body}");
+    // ...and a malformed key is refused before any term is built.
+    assert!(br.pos_delegate("zz", 1).unwrap_err().contains("hex"));
+    assert!(br.pos_delegate("04aa", 1).unwrap_err().contains("65 bytes"));
+    assert!(br.pos_undelegate("04aa").unwrap_err().contains("65 bytes"));
 }

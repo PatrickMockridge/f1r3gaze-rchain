@@ -16,9 +16,11 @@
 //! f1r3gaze pos status | delegations KEY | bonds | validators | trusted
 //!                                              [--json]
 //! f1r3gaze pos bond AMOUNT | unbond
+//! f1r3gaze pos delegate OPERATOR AMOUNT | undelegate OPERATOR
 //!                                    read the chain and its staking state, and
-//!                                    change the payer's own stake (the rchain
-//!                                    dialect only; bond is permissioned, so an
+//!                                    change the payer's stake -- on itself, or
+//!                                    on an operator it names (the rchain dialect
+//!                                    only; bond is permissioned, so an
 //!                                    unadmitted key is refused)
 //! f1r3gaze --version
 //! ```
@@ -193,6 +195,32 @@ fn pos(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
             println!("deploy {}", d.id());
             match b.pos_settle(&d.id())? {
                 Ok(()) => println!("withdrawal staged: it pays after the quarantine at the next boundary"),
+                Err(reason) => println!("refused: {reason}"),
+            }
+        }
+        // These two **name an operator key**; the delegator is always the
+        // payer. The key is validated before a term is built.
+        "delegate" => {
+            let op = a.get(1).copied().ok_or("pos delegate needs a 65-byte operator key")?;
+            let amount: i64 = a
+                .get(2)
+                .copied()
+                .ok_or("pos delegate needs an amount, in drops")?
+                .parse()
+                .map_err(|_| "the amount must be a whole number of drops")?;
+            let d = b.pos_delegate(op, amount)?;
+            println!("deploy {}", d.id());
+            match b.pos_settle(&d.id())? {
+                Ok(()) => println!("delegated {amount} drops to {}", shortn(op)),
+                Err(reason) => println!("refused: {reason}"),
+            }
+        }
+        "undelegate" => {
+            let op = a.get(1).copied().ok_or("pos undelegate needs a 65-byte operator key")?;
+            let d = b.pos_undelegate(op)?;
+            println!("deploy {}", d.id());
+            match b.pos_settle(&d.id())? {
+                Ok(()) => println!("undelegation staged: it pays after the quarantine at the next boundary"),
                 Err(reason) => println!("refused: {reason}"),
             }
         }

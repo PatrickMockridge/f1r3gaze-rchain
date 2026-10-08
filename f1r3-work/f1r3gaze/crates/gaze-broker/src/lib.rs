@@ -149,19 +149,27 @@ pub enum ShardClass {
     /// one, so a consenting page can lock the payer's REV or stage an unbond
     /// but cannot send funds anywhere or touch another key. Never seeded.
     Stake,
+    /// Stake the payer's REV on an operator **the page names**, and take it
+    /// back again.
+    ///
+    /// Its own class rather than part of `Stake`, because it is the one write
+    /// that names a key: a site trusted to bond or unbond the payer's own stake
+    /// is not thereby trusted to nominate who holds it. Never seeded.
+    Delegate,
 }
 
 impl ShardClass {
     /// Every class. **The length is a literal**, so growing the enum without
     /// growing this array compiles and then silently breaks `parse`, which
     /// breaks `FileGrants`' round-trip. `the_classes_round_trip` guards it.
-    pub const ALL: [ShardClass; 6] = [
+    pub const ALL: [ShardClass; 7] = [
         ShardClass::Read,
         ShardClass::Explore,
         ShardClass::Deploy,
         ShardClass::Session,
         ShardClass::Chain,
         ShardClass::Stake,
+        ShardClass::Delegate,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -171,6 +179,7 @@ impl ShardClass {
             ShardClass::Session => "session",
             ShardClass::Chain => "chain",
             ShardClass::Stake => "stake",
+            ShardClass::Delegate => "delegate",
         }
     }
     /// How the class reads in a consent prompt. Separate from [`Self::name`]
@@ -181,6 +190,9 @@ impl ShardClass {
         match self {
             ShardClass::Chain => "read the chain",
             ShardClass::Stake => "change your stake",
+            // The distinction that justifies a separate class, said out loud:
+            // whose keys the site gets to name.
+            ShardClass::Delegate => "stake your REV on a key it names",
             other => other.name(),
         }
     }
@@ -196,6 +208,8 @@ impl ShardClass {
             "session" => ShardClass::Session,
             "chain" => ShardClass::Chain,
             "stake" => ShardClass::Stake,
+            // One class, both ends of the same capability.
+            "delegate" | "undelegate" => ShardClass::Delegate,
             _ => return None,
         })
     }
@@ -663,7 +677,7 @@ mod tests {
         // `ALL`'s length is a literal: growing the enum without growing it
         // compiles and then silently stops `parse` from round-tripping, which
         // is how a remembered grant would vanish on restart.
-        assert_eq!(ShardClass::ALL.len(), 6);
+        assert_eq!(ShardClass::ALL.len(), 7);
         for c in ShardClass::ALL {
             assert_eq!(ShardClass::parse(c.name()), Some(c), "{} does not round-trip", c.name());
         }
@@ -729,6 +743,30 @@ mod tests {
         assert!(matches!(b.check_shard(7, "stake"), Err(Refusal::Ask(_))));
         b.allow_shard(7, ShardClass::Stake, Some(knf("shard!(3)").grant_hash())).unwrap();
         assert_eq!(b.check_shard(7, "stake"), Ok(ShardClass::Stake));
+    }
+
+    /// The one write that names a key gets its own class: a site trusted to
+    /// bond the payer's own stake is not thereby trusted to nominate who holds
+    /// it.
+    #[test]
+    fn the_delegate_class_is_separate_from_stake() {
+        assert_eq!(ShardClass::of_verb("delegate"), Some(ShardClass::Delegate));
+        assert_eq!(ShardClass::of_verb("undelegate"), Some(ShardClass::Delegate));
+        assert_ne!(ShardClass::of_verb("stake"), Some(ShardClass::Delegate));
+        assert_eq!(ShardClass::Delegate.prompt_action(), "stake your REV on a key it names");
+
+        let mut b = Broker::new(MemGrants::default());
+        let site = Site::of_url("https://a.example/").unwrap();
+        let mut p = b.plan(&site, &knf("net!(1) | shard!(2)"));
+        b.answer(&mut p, SHARD, true, false).unwrap();
+        b.install(7, &p);
+        // Even granted the stake class, delegating is still a separate ask.
+        b.allow_shard(7, ShardClass::Stake, None).unwrap();
+        assert_eq!(b.check_shard(7, "stake"), Ok(ShardClass::Stake));
+        assert!(matches!(b.check_shard(7, "delegate"), Err(Refusal::Ask(_))));
+        assert!(matches!(b.check_shard(7, "undelegate"), Err(Refusal::Ask(_))));
+        b.allow_shard(7, ShardClass::Delegate, None).unwrap();
+        assert_eq!(b.check_shard(7, "undelegate"), Ok(ShardClass::Delegate));
     }
 
     #[test]

@@ -161,6 +161,26 @@ pub fn withdraw_term() -> String {
     pos_write("@PoS!(\"withdraw\", *deployerId, *retCh)")
 }
 
+/// Stake `amount` of the payer's REV on the operator whose 65-byte key is
+/// `operator_hex`.
+///
+/// Unlike a bond, this **names a key**. The principal stays the delegator's —
+/// it is not a gift — but it is held in the operator's pool entry and shares
+/// that operator's slash risk and its pro-rata rewards. There is no trust gate
+/// (unlike `bond`): the only gates are that the operator is pooled, is not
+/// withdrawing, that the amount clears the minimum, and that the delegator has
+/// the funds.
+pub fn delegate_term(operator_hex: &str, amount: i64) -> String {
+    pos_write(&format!("@PoS!(\"delegate\", *deployerId, \"{operator_hex}\".hexToBytes(), {amount}, *retCh)"))
+}
+
+/// Stage the exit from a delegation. It is signed by the **delegator**, so only
+/// the key that staked can take it back; the principal keeps earning — and
+/// stays at risk — until the boundary, then a quarantine, then it pays.
+pub fn undelegate_term(operator_hex: &str) -> String {
+    pos_write(&format!("@PoS!(\"undelegate\", *deployerId, \"{operator_hex}\".hexToBytes(), *retCh)"))
+}
+
 /// The `(Bool, Nil | String)` reply a write produces: `Ok(())` when the node
 /// did the thing, `Err(reason)` when it refused.
 ///
@@ -412,5 +432,21 @@ mod tests {
         // Anything else is not an answer.
         assert!(reply_from(&[]).is_err());
         assert!(reply_from(&[json!({"ExprString": {"data": "?"}})]).is_err());
+    }
+
+    #[test]
+    fn the_delegation_terms_name_the_operator() {
+        for t in [delegate_term(KEY, 1_000_000), undelegate_term(KEY)] {
+            assert!(t.starts_with("new retCh,"), "{t}");
+            assert!(t.contains("deployerId(`rho:rchain:deployerId`)"), "{t}");
+            assert!(t.contains("deployId!(result)"), "{t}");
+            assert!(!t.contains("return!"), "{t}");
+            // Unlike bond/withdraw, these name a key -- the operator.
+            assert!(t.contains(&format!("\"{KEY}\".hexToBytes()")), "{t}");
+        }
+        assert!(delegate_term(KEY, 42).contains("delegate\", *deployerId,"));
+        assert!(delegate_term(KEY, 42).contains(", 42, *retCh)"), "the amount is carried");
+        assert!(undelegate_term(KEY).contains("undelegate\", *deployerId,"));
+        assert!(!undelegate_term(KEY).contains(", 42,"), "undelegate names no amount");
     }
 }

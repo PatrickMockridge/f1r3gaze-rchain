@@ -541,6 +541,29 @@ impl Bridge {
         self.sign_and_deploy(&key, &term, pos::STAKE_PHLO_LIMIT)
     }
 
+    /// Stake `drops` of the payer's REV on the operator `key_hex`.
+    ///
+    /// This **names a key**, unlike a bond: the principal stays the delegator's,
+    /// but it is held in the operator's pool entry and shares that operator's
+    /// slash risk and its pro-rata rewards.
+    pub fn pos_delegate(&self, key_hex: &str, drops: i64) -> Result<SignedDeploy, String> {
+        self.rchain_only("staking writes")?;
+        pos::validate_key(key_hex)?;
+        let (key, _) = self.payer.payer()?;
+        let term = pos::delegate_term(key_hex, drops);
+        self.sign_and_deploy(&key, &term, pos::STAKE_PHLO_LIMIT)
+    }
+
+    /// Stage the exit from a delegation. Signed by the delegator, so only the
+    /// key that staked can take it back.
+    pub fn pos_undelegate(&self, key_hex: &str) -> Result<SignedDeploy, String> {
+        self.rchain_only("staking writes")?;
+        pos::validate_key(key_hex)?;
+        let (key, _) = self.payer.payer()?;
+        let term = pos::undelegate_term(key_hex);
+        self.sign_and_deploy(&key, &term, pos::STAKE_PHLO_LIMIT)
+    }
+
     /// A deploy's outcome, including the value it produced.
     pub fn deploy_outcome(&self, id: &str) -> Result<chain::DeployOutcome, String> {
         self.validator().deploy_outcome(id)
@@ -636,6 +659,18 @@ fn hash_arg(n: &Norm) -> Option<[u8; 32]> {
             gaze_net::unhex(s.strip_prefix("blake2b-256:").unwrap_or(s))?.try_into().ok()
         }
     }
+}
+
+/// A validator key from a page, as hex. A page may hand it either as a 65-byte
+/// array or as its hex spelling; either way it is **validated before a term is
+/// built**, so a page cannot put anything but a real key into the term.
+fn key_arg(n: &Norm) -> Option<String> {
+    let hex = match n.as_lit() {
+        Some(Lit::Bytes(b)) if b.len() == 65 => gaze_net::hex(b),
+        _ => n.as_str()?.to_string(),
+    };
+    crate::pos::validate_key(&hex).ok()?;
+    Some(hex)
 }
 
 impl ShardService {
@@ -873,6 +908,47 @@ impl ShardService {
                         // A refusal is the *chain's answer*, not a failure --
                         // the deploy succeeded and the program declined -- so it
                         // gets its own code and a page can tell them apart.
+                        Ok(Err(reason)) => err3("refused", &reason),
+                        Err(e) => err3("shard", &e),
+                    })
+                });
+            }
+            // Stake on an operator **the page names**, and take it back. The
+            // key is the page's, which is why this is its own consent class: a
+            // site trusted to bond or unbond the payer's own stake is not
+            // thereby trusted to nominate who holds it. The key is validated
+            // before a term is built, and the delegator is always the payer.
+            "delegate" | "undelegate" => {
+                if self.bridge.cfg.dialect != NodeDialect::Rchain {
+                    return self.now(reply(err3(
+                        "unavailable",
+                        "the staking writes are the rchain dialect's; f1r3fly has no such route",
+                    )));
+                }
+                let undelegate = verb == "undelegate";
+                let operator = args.get(1).and_then(key_arg);
+                let amount = args.get(2).and_then(|v| v.as_int());
+                self.job(move |b| {
+                    let Some(operator) = operator else {
+                        return reply(err3("type", "this wants a 65-byte operator key"));
+                    };
+                    let d = if undelegate {
+                        b.pos_undelegate(&operator)
+                    } else {
+                        match amount {
+                            Some(a) => b.pos_delegate(&operator, a),
+                            None => return reply(err3("type", "delegate wants an amount")),
+                        }
+                    };
+                    let d = match d {
+                        Ok(d) => d,
+                        Err(e) => return reply(err3("shard", &e)),
+                    };
+                    let id = d.id();
+                    reply(match b.pos_settle(&id) {
+                        Ok(Ok(())) => ok3("node", Norm::map(vec![(Norm::str("deploy"), Norm::str(&id))])),
+                        // The chain's answer, not a failure -- same code the
+                        // `stake` verb uses.
                         Ok(Err(reason)) => err3("refused", &reason),
                         Err(e) => err3("shard", &e),
                     })

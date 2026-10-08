@@ -189,7 +189,7 @@ Three defects in the existing code were found and fixed on the way:
 
 ## Tests
 
-99 tests in this workspace, all passing — four of them env-gated live tests
+103 tests in this workspace, all passing — five of them env-gated live tests
 against a running `rnode` (CampF1R3 carries its own 181):
 
 | crate | tests | what they establish |
@@ -287,6 +287,7 @@ node:
 | chain reads | — (no counterpart) | `block` / `blocks` / `deploy` / `is-finalized` / `deploys` / `capabilities` / `shards` |
 | staking reads | — (no counterpart) | `/api/v1/pos`, `/api/v1/pos/delegations`, and the read-only `rho:rchain:pos` methods |
 | staking writes | — (no counterpart) | `bond` / `withdraw` through the native `rho:rchain:pos`, on the payer's own key |
+| delegation | — (no counterpart) | `delegate` / `undelegate` on a **named** operator, through the native `rho:rchain:pos` |
 
 Two things are lost on rchain, and are dialect-scoped rather than papered over:
 
@@ -317,7 +318,11 @@ once per site and never granted with the shard itself. The staking writes are th
 same shape under a second class, `stake!`: a page names an *amount*, never a key,
 so it can lock the payer's REV or stage an unbond and nothing else — it cannot
 send funds anywhere or touch another key, which is what makes exposing it
-defensible. A refusal is not a failure: the deploy succeeds and the program
+defensible. Delegation is a **third** class, `delegate!`, because it is the one
+write that names a key: a site trusted to bond or unbond the payer's own stake is
+not thereby trusted to nominate who holds it, so the class is asked for
+separately and the prompt says whose keys are in play. A refusal is not a
+failure: the deploy succeeds and the program
 declines, so the node's reason is read back from the deploy's own
 `rho:rchain:deployId` and reported as `("err", "refused", reason)`.
 

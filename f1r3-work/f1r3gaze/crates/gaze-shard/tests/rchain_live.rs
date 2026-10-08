@@ -231,3 +231,37 @@ fn the_rchain_staking_write_reports_the_nodes_refusal() {
     let reason = answer.expect_err("an already-bonded key cannot bond again");
     assert!(reason.contains("already bonded"), "unexpected refusal: {reason}");
 }
+
+/// The delegation writes, proven **without mutating** the dev chain.
+///
+/// The first probe is the informative one: the node checks self-delegation
+/// *before* any other gate, so `A key cannot delegate to itself` can only be
+/// produced once the operator key was parsed out of the term and the contract
+/// was reached — which is the named-key path that `bond`/`withdraw` cannot
+/// exercise, since they name no key at all.
+///
+/// A *successful* delegation is available on this chain (the payer's vault is
+/// funded and the genesis bonds are pooled) and is deliberately **not** run: it
+/// would put a delegation on an operator's bond entry, after which that
+/// operator's `withdraw` is refused for the rest of the suite. The success path
+/// is covered offline (`a_delegation_settles_on_its_result`).
+#[test]
+fn the_rchain_delegation_writes_report_the_nodes_refusal() {
+    let Some((base, key)) = base_and_key() else {
+        eprintln!("RCHAIN_NODE unset; skipping the live delegation test");
+        return;
+    };
+    let me = gaze_net::hex(&public_key(&key));
+    let b = bridge(&base, key);
+
+    let d = b.pos_delegate(&me, 1_000_000).expect("the deploy is accepted");
+    eprintln!("delegate deploy {}", d.id());
+    let reason = b.pos_settle(&d.id()).expect("settles").expect_err("self-delegation is refused");
+    eprintln!("delegate to itself -> {reason}");
+    assert!(reason.contains("delegate to itself"), "unexpected refusal: {reason}");
+
+    let d2 = b.pos_undelegate(&me).expect("the deploy is accepted");
+    let reason2 = b.pos_settle(&d2.id()).expect("settles").expect_err("there is nothing to withdraw");
+    eprintln!("undelegate with no delegation -> {reason2}");
+    assert!(reason2.contains("no delegation"), "unexpected refusal: {reason2}");
+}
