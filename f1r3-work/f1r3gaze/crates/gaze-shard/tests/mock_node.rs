@@ -158,6 +158,10 @@ fn mock_rchain_full(value: Value, num: i64, finalized: bool, pos_error: bool, de
                 } else {
                     (200, json!({"latestBlockNumber": num, "epochLength": 100, "quarantineLength": 10, "epoch": 0, "blocksUntilEpochBoundary": 5, "activeValidators": [KEY], "pendingWithdrawals": []}).to_string())
                 }
+            } else if path.starts_with("/api/propose") {
+                // The admin route. In these tests one listener answers both
+                // ports, so `admin = <base>` points here.
+                (200, json!("Success! Block 1234 created and added.").to_string())
             } else if path.starts_with("/api/status") {
                 // The wallet reads the shard id here rather than guessing it.
                 (200, json!({"shardId": "/root", "latestBlockNumber": num, "minPhloPrice": 1}).to_string())
@@ -634,6 +638,7 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     };
     assert!(br.publish_site("rho:serve:1:ab:p:^1", &site).is_err());
     assert!(br.publish_blobs(&[([0u8; 32], b"x".to_vec())]).is_err());
+    assert!(br.propose().is_err());
     // The wallet's balance read was ungated before this change and would have
     // shipped a term naming `rho:rchain:revVault` to an f1r3fly node.
     assert!(br.rev_balance(KEY).is_err());
@@ -802,4 +807,46 @@ fn publishing_blobs_writes_the_reader_layout() {
     // A file over the reader's limit is refused before any deploy is built.
     let big = vec![0u8; gaze_shard::bridge::DRIVE_MAX + 1];
     assert!(br.publish_blobs(&[([0u8; 32], big)]).unwrap_err().contains("at most"));
+}
+
+/// `propose` lives on the admin listener, so it needs the admin address — and
+/// there is no default, because that listener acts with the node's own key.
+#[test]
+fn propose_forces_a_block_and_needs_an_admin_address() {
+    let (base, vlog) = mock_rchain(manifest(), 10, true);
+    let mk = |admin: Option<String>| {
+        let d = std::env::temp_dir().join(format!("gaze-propose-{}-{}", std::process::id(), admin.is_some()));
+        let _ = std::fs::remove_dir_all(&d);
+        let blobs = Arc::new(Blobs::new(ContentCache::new(d.join("blobs"), 1 << 20), Http::new()));
+        let cfg = ShardConfig {
+            dialect: NodeDialect::Rchain,
+            observers: vec![base.clone()],
+            validator: base.clone(),
+            quorum: 1,
+            admin,
+            ..Default::default()
+        };
+        Bridge::new(
+            cfg,
+            Http::new(),
+            Pool::new(2),
+            Arc::new(KeyPayer {
+                key: k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap(),
+                address: "1111test".into(),
+            }),
+            blobs,
+        )
+    };
+
+    // Without an address there is nothing to call, and the error says what to set.
+    let e = mk(None).propose().unwrap_err();
+    assert!(e.contains("admin = "), "{e}");
+
+    let b = mk(Some(base.clone()));
+    let msg = b.propose().unwrap();
+    assert!(msg.contains("created and added"), "{msg}");
+    assert!(
+        vlog.lock().unwrap().iter().any(|(p, _)| p == "/api/propose"),
+        "the admin route was the one called"
+    );
 }

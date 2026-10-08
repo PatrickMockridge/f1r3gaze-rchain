@@ -13,6 +13,9 @@
 //!                                    manage the wallets that pay for deploys
 //! f1r3gaze chain block HASH | blocks [N] | find-deploy ID | finalized HASH
 //!                | pool | caps | shards        [--json]
+//! f1r3gaze chain propose
+//!                                    force a block; needs the node's admin
+//!                                    address (`admin = …` in settings.conf)
 //! f1r3gaze pos status | delegations KEY | bonds | validators | trusted
 //!                                              [--json]
 //! f1r3gaze pos bond AMOUNT | unbond
@@ -135,6 +138,10 @@ fn chain(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
                 println!("{}  {}  #{}", x.shard_id, if x.primary { "primary" } else { "member" }, x.latest_block_number);
             }
         }
+        // The one write in this surface: force a block. It needs the node's
+        // admin address (`admin = …` in settings.conf), because the listener
+        // that acts with the node's own key is not the API one.
+        "propose" => println!("{}", eng.bridge.propose()?),
         other => return Err(format!("unknown chain read {other}")),
     }
     Ok(())

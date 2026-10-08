@@ -59,6 +59,7 @@ pub const TEMPLATE: &str = "# F1R3Gaze settings. Lists are comma-separated.
 # shard_id = root              # the rchain dialect defaults to /root
 # quorum = 2
 # phlo_limit = 250000          # the deploy bound quoted when there is no cost estimate (rchain)
+# admin = http://127.0.0.1:40405   # the node's admin API; only `chain propose` needs it
 # mirrors = https://cdn.example/blob/
 # https_only = false
 # Wallet balances, history and transfers (the Embers service F1R3Sky uses):
@@ -94,6 +95,7 @@ impl Settings {
                 "quorum" => s.shard.quorum = v.parse().unwrap_or(2),
                 "phlo_price" => s.shard.phlo_price = v.parse().unwrap_or(1),
                 "phlo_limit" => s.shard.phlo_limit = v.parse().unwrap_or(s.shard.phlo_limit),
+                "admin" => s.shard.admin = Some(v.to_string()).filter(|v| !v.is_empty()),
                 "mirrors" => s.mirrors = list(v),
                 "cache_bytes" => s.cache_bytes = v.parse().unwrap_or(s.cache_bytes),
                 "store_quota" => s.store_quota = v.parse().unwrap_or(s.store_quota),

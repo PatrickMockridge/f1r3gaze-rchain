@@ -35,6 +35,12 @@ pub struct ShardConfig {
     pub dialect: NodeDialect,
     /// The phlo bound quoted when the node offers no cost estimate (rchain).
     pub phlo_limit: i64,
+    /// The node's **admin** HTTP base (rnode's port 40405), for the operations
+    /// that live there rather than on the API port — today just `propose`.
+    ///
+    /// `None` by default: the admin listener is bound to loopback and its port
+    /// is a deployment's business, so it is named rather than guessed.
+    pub admin: Option<String>,
 }
 
 impl Default for ShardConfig {
@@ -48,6 +54,7 @@ impl Default for ShardConfig {
             user: "default".into(),
             dialect: NodeDialect::F1r3fly,
             phlo_limit: NodeDialect::F1r3fly.default_phlo_limit(),
+            admin: None,
         }
     }
 }
@@ -597,6 +604,23 @@ impl Bridge {
     /// A deploy's outcome, including the value it produced.
     pub fn deploy_outcome(&self, id: &str) -> Result<chain::DeployOutcome, String> {
         self.validator().deploy_outcome(id)
+    }
+
+    /// Force a block — the operation that moves a node off `--autopropose`.
+    ///
+    /// It lives on the node's **admin** listener, so it needs
+    /// [`ShardConfig::admin`]. There is no default: the admin port is a
+    /// deployment's business and the listener acts with the node's own key, so
+    /// guessing an address would aim a privileged request somewhere unintended.
+    ///
+    /// Not a page verb, and not on `f1r3fly` — see [`Node::propose`].
+    pub fn propose(&self) -> Result<String, String> {
+        let admin = self
+            .cfg
+            .admin
+            .as_ref()
+            .ok_or("no admin address: set `admin = http://host:40405` in settings.conf")?;
+        Node::new(admin, self.cfg.dialect, self.http.clone()).propose()
     }
 
     /// Wait for a deploy to settle and return its outcome.

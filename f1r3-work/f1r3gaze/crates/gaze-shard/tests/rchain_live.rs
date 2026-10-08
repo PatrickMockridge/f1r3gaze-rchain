@@ -36,6 +36,10 @@ fn base_and_key() -> Option<(String, k256::ecdsa::SigningKey)> {
 }
 
 fn bridge(base: &str, key: k256::ecdsa::SigningKey) -> Arc<Bridge> {
+    bridge_admin(base, key, None)
+}
+
+fn bridge_admin(base: &str, key: k256::ecdsa::SigningKey, admin: Option<String>) -> Arc<Bridge> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!("gaze-rchain-live-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
@@ -47,6 +51,7 @@ fn bridge(base: &str, key: k256::ecdsa::SigningKey) -> Arc<Bridge> {
             observers: vec![base.to_string()],
             validator: base.to_string(),
             quorum: 1,
+            admin,
             ..Default::default()
         },
         Http::new(),
@@ -363,4 +368,52 @@ fn publishing_a_site_round_trips_on_a_live_node() {
     assert!(e.contains("different values"), "{e}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `propose` on a live node — the last app-facing operation, and the only one on
+/// the **admin** listener rather than the API port, which is why `admin` is
+/// configuration rather than derived.
+///
+/// What this pins is the *wiring*: the admin listener is reachable, `/api/propose`
+/// exists there, and the origin guard accepts a request with no `Origin` (which
+/// is what a CLI sends and what a cross-origin page cannot). It deliberately does
+/// not require a block to be created, because on this net one usually is not:
+/// an explicit propose goes through a round gate that wants other validators
+/// ("Must wait for more blocks from other validators", AUDIT #213), and this
+/// devnet runs one on purpose. The node's own refusal is still an answer from
+/// `/api/propose` — and no other route produces that sentence.
+#[test]
+fn proposing_reaches_the_admin_listener_on_a_live_node() {
+    let Some((base, key)) = base_and_key() else {
+        eprintln!("RCHAIN_NODE unset; skipping the live propose test");
+        return;
+    };
+    // The devnet's documented admin address; override with RCHAIN_ADMIN.
+    let admin = std::env::var("RCHAIN_ADMIN").unwrap_or_else(|_| "http://127.0.0.1:40405".into());
+    let b = bridge_admin(&base, key.clone(), Some(admin.clone()));
+
+    match b.propose() {
+        Ok(msg) => {
+            eprintln!("propose via {admin} -> {msg}");
+            // A success names the block it closed.
+            assert!(msg.contains("created and added") && msg.contains("Block "), "{msg}");
+        }
+        Err(e) => {
+            eprintln!("propose via {admin} refused: {e}");
+            // The node has more than one refusal sentence here — "Proposal
+            // failed: Must wait for more blocks from other validators" when the
+            // round gate holds, and "another propose is in progress" when two
+            // land at once. What matters is that the answer *is* a propose
+            // outcome: a missing route says "no route" and a cross-origin
+            // request is refused with its own sentence, and neither starts here.
+            assert!(
+                e.contains("Failure: "),
+                "the answer is the node's own propose outcome, not a routing or guard failure: {e}"
+            );
+        }
+    }
+
+    // And without an admin address nothing is sent anywhere.
+    let no_admin = bridge(&base, key);
+    assert!(no_admin.propose().unwrap_err().contains("admin = "));
 }

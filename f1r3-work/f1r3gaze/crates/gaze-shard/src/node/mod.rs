@@ -284,6 +284,28 @@ impl Node {
         }
     }
 
+    /// Force a block, returning the node's message.
+    ///
+    /// The route is on the node's **admin** listener (rnode's 40405), not the
+    /// API port, so a `Node` built from the API base will not find it —
+    /// [`crate::Bridge::propose`] builds the right one from `ShardConfig::admin`.
+    pub fn propose(&self) -> Result<String, String> {
+        match self.dialect {
+            NodeDialect::Rchain => {
+                let v = self.call("POST", "/api/propose", None)?;
+                Ok(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
+            }
+            // Deliberately not the usual "f1r3fly has no such route": nobody has
+            // run an f1r3fly node here, so what is true is that this is unproven,
+            // and a refusal that says so is better than a claim either way.
+            NodeDialect::F1r3fly => Err(
+                "propose is wired for the rchain dialect only: its admin route has not been \
+                 verified against a real f1r3fly node"
+                    .into(),
+            ),
+        }
+    }
+
     /// Submit; returns the node's message.
     pub fn deploy(&self, d: &SignedDeploy) -> Result<String, String> {
         match self.dialect {

@@ -25,6 +25,7 @@ f1r3gaze wallet new|import|export|use|list|balance|send|remove ...
                                     the wallets that pay for deploys (docs/wallet.md)
 f1r3gaze chain block HASH | blocks [N] | find-deploy ID | finalized HASH
                | pool | caps | shards     [--json]
+f1r3gaze chain propose              force a block (needs `admin = …`)
 f1r3gaze pos status | delegations KEY | bonds | validators | trusted
                                              [--json]
                                     read the chain and its staking state
@@ -67,7 +68,7 @@ built-in `gaze://newtab` and `gaze://about`.
 Settings live in `settings.conf` in the profile directory
 (`~/Library/Application Support/F1R3Gaze`, `%APPDATA%\F1R3Gaze`,
 `$XDG_DATA_HOME/f1r3gaze`): shard observers, the validator, the shard id,
-the quorum, blob mirrors, `https_only`, and for the wallet `embers_api` and
+the quorum, blob mirrors, `https_only`, the node's admin address, and for the wallet `embers_api` and
 `max_fee`.
 
 ### The wallet: the agent driving the browser pays
@@ -192,7 +193,7 @@ Three defects in the existing code were found and fixed on the way:
 
 ## Tests
 
-110 tests in this workspace, all passing — six of them env-gated live tests
+112 tests in this workspace, all passing — seven of them env-gated live tests
 against a running `rnode` (CampF1R3 carries its own 181):
 
 | crate | tests | what they establish |
@@ -290,6 +291,7 @@ node:
 | staking writes | — (no counterpart) | `bond` / `withdraw` through the native `rho:rchain:pos`, on the payer's own key |
 | delegation | — (no counterpart) | `delegate` / `undelegate` on a **named** operator, through the native `rho:rchain:pos` |
 | site publishing | `rho:registry:insertSigned` | `@"rho:serve:1:…"!(manifest)` plus the files in F1R3Drive's on-chain layout, as deploys |
+| propose (admin) | — (not wired) | `POST /api/propose`, on the admin port named by `admin = …` |
 
 Two things are lost on rchain, and are dialect-scoped rather than papered over:
 
