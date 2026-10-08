@@ -225,3 +225,16 @@ fn a_dishonest_embers_gets_nothing_signed() {
     assert!(e.contains("exactly what you asked for"), "{e}");
     assert!(!m.log.lock().unwrap().iter().any(|(p, _)| p.ends_with("/transfer/send")), "nothing was sent");
 }
+
+/// The F1R3Cap derivation *is* rnode's REV address. Verified live: gaze derived
+/// this address for the key below, rnode's genesis accepted it in `wallets.txt`
+/// and credited the vault, and a deploy signed by that key then finalized — so
+/// the two derivations name the same vault. `rholang/src/util/rev_address.rs`
+/// derives the same prefix (`0x00000000`), key hash
+/// (`keccak256(keccak256(pk[1..])[12..])`), 4-byte BLAKE2b-256 checksum and
+/// Bitcoin-alphabet base58.
+#[test]
+fn the_address_is_rnodes_rev_address() {
+    let a = Address::from_key(key("d639c2e0dfce4b910b80b3dd052d05290796e486e167c0403aab82eb2e8047f8").verifying_key());
+    assert_eq!(a.as_str(), "11112ptoW26K6rXCHe1GLKocEFP5mkrNrRqP66ozGT2yqHzvJXTVV");
+}

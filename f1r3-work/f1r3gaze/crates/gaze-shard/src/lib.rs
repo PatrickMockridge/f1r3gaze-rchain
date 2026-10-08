@@ -19,7 +19,9 @@ pub mod keys;
 pub mod node;
 pub mod site;
 pub mod term;
+pub mod wallet;
 
 pub use bridge::{Bridge, DriveSource, EventHub, KeyPayer, Payer, Prompt, Rung, ShardConfig, ShardOut, ShardService};
 pub use keys::{FileKeystore, Keystore, MemKeystore};
+pub use node::{Node, NodeDialect};
 pub use site::{SiteAddr, SiteManifest};

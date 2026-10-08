@@ -75,7 +75,9 @@ the deploy id, block data, crypto. **`rho:rchain:deployerId` is refused.** A
 page can cost phlo (the consent prompt quotes it, with the paying wallet and
 its balance); it cannot move funds. Transfers go through Embers, as in
 F1R3Sky, but the browser decodes and checks every prepared contract against
-Embers' transfer template before signing it. Details: `docs/wallet.md`.
+Embers' transfer template before signing it. (On the rchain dialect they go
+through the node's native `rho:rchain:revVault` instead -- see *Node dialects*.)
+Details: `docs/wallet.md`.
 
 ### Events
 
@@ -240,6 +242,59 @@ End-to-end, on the real binary:
   the account that pays is the deployer). Sites can therefore link a user's
   deploys; users who want separate identities keep several wallets. Session
   keys remain as session identities but no longer sign.
+
+## Node dialects: f1r3fly and rchain
+
+The bridge speaks to two node implementations, chosen by `dialect` in
+`settings.conf`:
+
+```
+dialect = f1r3fly   # F1R3FLY's f1r3node-rust (the default)
+dialect = rchain    # rchain-rust's rnode
+```
+
+The deploy wire is the same on both — the same `DeployDataProto` fields, the
+same DER secp256k1 signature over the BLAKE2b-256 prehash, the same
+`deployer`/`signature`/`sigAlgorithm` JSON — so a deploy signed for one is what
+the other verifies, except for proto field 13 (`expiration_timestamp`), which
+only f1r3fly defines and which is omitted for rchain. The F1R3Cap wallet
+address is likewise rnode's REV address, byte for byte.
+
+The read surface differs, and the rchain dialect adapts rather than moving the
+node:
+
+| | f1r3fly | rchain |
+|---|---|---|
+| registry | `GET /api/registry/{uri}` | read the manifest as data on a public channel named by the same `rho:serve:1:…` string |
+| explore | `POST /api/explore-deploy` `{"term":…}` | `POST /api/explore-deploy-by-block-hash` `{term, blockHash, usePreStateHash}` |
+| cost estimate | `POST /api/estimate-cost` | none: the prompt quotes the configured bound ("up to `phlo_limit`") |
+| deploy status | `GET /api/deploy-finalization-status/{sig}` | `GET /api/v1/deploy-status/{sig}`, a tagged enum |
+| finality events | `block-finalised` on `/ws/events` | none: the anchor block is polled |
+| shard id | `root` | `/root` |
+| wallet balance | Embers `state` | `revVault!("getBalance", addr, *ret)` through an exploratory deploy |
+| wallet transfer | an Embers prepared contract | `revVault!("transfer", *deployerId, to, drops, *ret)`, as a deploy |
+| faucet | Embers | `POST /api/faucet {address}` |
+
+Two things are lost on rchain, and are dialect-scoped rather than papered over:
+
+- **A measured deploy cost.** rchain has no estimate endpoint, so the consent
+  prompt quotes a bound (`phlo_limit`, default 250000) instead of a price.
+- **Wallet transfer history.** Balances, REV transfers and the devnet faucet
+  work on both dialects -- on rchain through the node's native
+  `rho:rchain:revVault` (`getBalance` / `transfer`), on f1r3fly through Embers.
+  What rchain has no counterpart for is Embers' *server-side history*, so
+  `embers_api` stays f1r3fly-only and `f1r3gaze wallet balance` prints a bare
+  balance there.
+
+A single-validator `rnode` proposes blocks but never finalizes, so
+`/api/last-finalized-block` answers 400; the rchain dialect falls back to the
+newest block from `/api/blocks` as its anchor. On a net that does finalize, the
+fringe is used.
+
+Proven live: `crates/gaze-shard/tests/rchain_live.rs` deploys a program this
+crate signs against a running `rnode` and checks the node's reported deploy id
+against the signature, then reads a REV balance, moves REV, and funds from the
+faucet. Set `RCHAIN_NODE` and `RCHAIN_DEPLOYER_KEY` to run it.
 
 ## Not in this release
 

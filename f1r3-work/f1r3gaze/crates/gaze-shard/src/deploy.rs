@@ -1,9 +1,15 @@
-//! Deploy construction and signing, exactly as `f1r3node-rust` verifies it
+//! Deploy construction and signing, exactly as the node verifies it
 //! (`crypto::signatures::Signed::from_signed_data`): the signature is DER
 //! ECDSA over secp256k1, on the BLAKE2b-256 prehash of the protobuf encoding
 //! of `DeployDataProto` with the signer fields (deployer, sig, sigAlgorithm)
 //! empty; the deployer is the 65-byte uncompressed public key.
+//!
+//! The preimage differs by dialect: F1R3FLY's node carries an
+//! `expiration_timestamp` as proto field 13, which rchain-rust's
+//! `DeployDataProto` does not define. The field-number set is otherwise
+//! identical, so the only difference is whether field 13 is emitted.
 
+use crate::node::NodeDialect;
 use k1ndl1ng_norm::hash::blake2b_256;
 use k256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
 use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
@@ -46,7 +52,11 @@ fn field_bytes(n: u32, b: &[u8], out: &mut Vec<u8>) {
 impl DeployData {
     /// proto3 encoding of `DeployDataProto` without signer fields, fields in
     /// number order, defaults omitted (what `prost` produces).
-    pub fn signing_bytes(&self) -> Vec<u8> {
+    ///
+    /// Field 13 (`expiration_timestamp`) is emitted only for the f1r3fly
+    /// dialect: rchain-rust's `DeployDataProto` stops at field 12, and a
+    /// signature over a preimage that includes field 13 is rejected there.
+    pub fn signing_bytes_for(&self, dialect: NodeDialect) -> Vec<u8> {
         let mut o = Vec::new();
         field_bytes(2, self.term.as_bytes(), &mut o);
         field_varint(3, self.timestamp, &mut o);
@@ -54,8 +64,16 @@ impl DeployData {
         field_varint(8, self.phlo_limit, &mut o);
         field_varint(10, self.valid_after_block_number, &mut o);
         field_bytes(11, self.shard_id.as_bytes(), &mut o);
-        field_varint(13, self.expiration_timestamp.unwrap_or(0), &mut o);
+        if dialect == NodeDialect::F1r3fly {
+            field_varint(13, self.expiration_timestamp.unwrap_or(0), &mut o);
+        }
         o
+    }
+
+    /// The f1r3fly preimage. The Embers-prepared-contract path and its tests
+    /// are pinned to this dialect.
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        self.signing_bytes_for(NodeDialect::F1r3fly)
     }
 
     /// Decode prepared contract bytes (a `DeployDataProto` without signer
@@ -120,8 +138,12 @@ impl DeployData {
         Ok(d)
     }
 
+    pub fn signing_hash_for(&self, dialect: NodeDialect) -> [u8; 32] {
+        blake2b_256(&self.signing_bytes_for(dialect)).0
+    }
+
     pub fn signing_hash(&self) -> [u8; 32] {
-        blake2b_256(&self.signing_bytes()).0
+        self.signing_hash_for(NodeDialect::F1r3fly)
     }
 }
 
@@ -130,20 +152,28 @@ pub struct SignedDeploy {
     pub data: DeployData,
     pub deployer: Vec<u8>,
     pub sig: Vec<u8>,
+    /// The dialect this was signed for: the two preimages differ by field 13,
+    /// so a deploy signed for one node does not verify on the other.
+    pub dialect: NodeDialect,
 }
 
 pub fn public_key(k: &SigningKey) -> Vec<u8> {
     k.verifying_key().to_encoded_point(false).as_bytes().to_vec()
 }
 
-pub fn sign(k: &SigningKey, data: DeployData) -> Result<SignedDeploy, String> {
-    let sig: Signature = k.sign_prehash(&data.signing_hash()).map_err(|e| e.to_string())?;
+pub fn sign_for(k: &SigningKey, data: DeployData, dialect: NodeDialect) -> Result<SignedDeploy, String> {
+    let sig: Signature = k.sign_prehash(&data.signing_hash_for(dialect)).map_err(|e| e.to_string())?;
     let sig = sig.normalize_s().unwrap_or(sig);
     Ok(SignedDeploy {
         deployer: public_key(k),
         sig: sig.to_der().as_bytes().to_vec(),
         data,
+        dialect,
     })
+}
+
+pub fn sign(k: &SigningKey, data: DeployData) -> Result<SignedDeploy, String> {
+    sign_for(k, data, NodeDialect::F1r3fly)
 }
 
 /// Sign prepared contract bytes as the Embers SDK's `signContract` does:
@@ -160,22 +190,27 @@ pub fn sign_bytes(k: &SigningKey, bytes: &[u8]) -> Result<Vec<u8>, String> {
 pub fn verify(d: &SignedDeploy) -> bool {
     let Ok(vk) = VerifyingKey::from_sec1_bytes(&d.deployer) else { return false };
     let Ok(sig) = Signature::from_der(&d.sig) else { return false };
-    vk.verify_prehash(&d.data.signing_hash(), &sig).is_ok()
+    vk.verify_prehash(&d.data.signing_hash_for(d.dialect), &sig).is_ok()
 }
 
 impl SignedDeploy {
-    /// The body of `POST /api/deploy`.
+    /// The body of `POST /api/deploy`. The `data` object carries only the
+    /// fields the dialect's `DeployDataProto` defines: rchain omits
+    /// `expiration_timestamp`, which it does not have.
     pub fn to_json(&self) -> serde_json::Value {
+        let mut data = serde_json::json!({
+            "term": self.data.term,
+            "timestamp": self.data.timestamp,
+            "phloPrice": self.data.phlo_price,
+            "phloLimit": self.data.phlo_limit,
+            "validAfterBlockNumber": self.data.valid_after_block_number,
+            "shardId": self.data.shard_id,
+        });
+        if self.dialect == NodeDialect::F1r3fly {
+            data["expiration_timestamp"] = serde_json::json!(self.data.expiration_timestamp);
+        }
         serde_json::json!({
-            "data": {
-                "term": self.data.term,
-                "timestamp": self.data.timestamp,
-                "phloPrice": self.data.phlo_price,
-                "phloLimit": self.data.phlo_limit,
-                "validAfterBlockNumber": self.data.valid_after_block_number,
-                "shardId": self.data.shard_id,
-                "expiration_timestamp": self.data.expiration_timestamp,
-            },
+            "data": data,
             "deployer": gaze_net::hex(&self.deployer),
             "signature": gaze_net::hex(&self.sig),
             "sigAlgorithm": "secp256k1",
@@ -242,5 +277,36 @@ mod tests {
         u.data.shard_id = "other".into();
         assert!(!verify(&u), "a replay on another shard is refused");
         assert_eq!(s.to_json()["sigAlgorithm"], "secp256k1");
+    }
+
+    #[test]
+    fn rchain_preimage_omits_field_13() {
+        let d = DeployData {
+            term: "Nil".into(),
+            timestamp: 1,
+            phlo_price: 1,
+            phlo_limit: 300,
+            valid_after_block_number: 0,
+            shard_id: "/root".into(),
+            expiration_timestamp: Some(2),
+        };
+        // The rchain preimage is the f1r3fly one minus the field-13 tag.
+        let b = d.signing_bytes_for(NodeDialect::Rchain);
+        assert!(!b.contains(&0x68), "field 13 (0x68) must be absent for rchain");
+        // 0x12 len "Nil" | 0x18 1 | 0x38 1 | 0x40 300 | 0x5a len "/root"
+        assert_eq!(b, vec![0x12, 3, b'N', b'i', b'l', 0x18, 1, 0x38, 1, 0x40, 0xac, 0x02, 0x5a, 5, b'/', b'r', b'o', b'o', b't']);
+        let mut f = b.clone();
+        f.extend_from_slice(&[0x68, 2]);
+        assert_eq!(d.signing_bytes(), f, "f1r3fly is the rchain preimage plus field 13");
+
+        // A deploy signed for one dialect does not verify for the other, and
+        // the JSON body carries `expiration_timestamp` only on f1r3fly.
+        let k = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let s = sign_for(&k, d, NodeDialect::Rchain).unwrap();
+        assert!(verify(&s));
+        assert!(s.to_json()["data"].get("expiration_timestamp").is_none(), "rchain body omits it");
+        let crossed = SignedDeploy { dialect: NodeDialect::F1r3fly, ..s };
+        assert!(!verify(&crossed), "the rchain preimage must not verify as f1r3fly");
+        assert!(crossed.to_json()["data"].get("expiration_timestamp").is_some(), "f1r3fly body keeps it");
     }
 }

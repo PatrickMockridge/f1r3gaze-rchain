@@ -1,0 +1,222 @@
+//! The node client: one of two dialects behind one interface.
+//!
+//! `f1r3node-rust` (F1R3FLY) and `rnode` (rchain-rust) both speak a
+//! RChain-family HTTP API, but they differ in the routes, request bodies and
+//! response shapes at exactly the places this crate depends on. Each dialect
+//! lives in its own module — [`f1r3fly`] and [`rchain`] — so that a
+//! f1r3fly-only convention cannot leak into rchain behaviour, or the reverse.
+//! This module is the seam: [`Node`] carries the dialect and dispatches.
+
+mod f1r3fly;
+mod rchain;
+
+use crate::deploy::SignedDeploy;
+use gaze_net::{Http, HttpRequest};
+use serde_json::Value;
+
+/// Which node the bridge speaks to.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum NodeDialect {
+    /// F1R3FLY's `f1r3node-rust`: `/api/registry`, `/api/estimate-cost`,
+    /// `/api/deploy-finalization-status` and a `/ws/events` stream.
+    #[default]
+    F1r3fly,
+    /// rchain-rust's `rnode`: the same deploy wire, but no registry, no
+    /// estimate-cost and no websocket, and a tagged `deploy-status` reply.
+    Rchain,
+}
+
+impl NodeDialect {
+    pub fn name(self) -> &'static str {
+        match self {
+            NodeDialect::F1r3fly => "f1r3fly",
+            NodeDialect::Rchain => "rchain",
+        }
+    }
+
+    /// The `settings.conf` spelling.
+    pub fn parse(s: &str) -> Option<NodeDialect> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "f1r3fly" | "f1r3" | "f1r3node" => Some(NodeDialect::F1r3fly),
+            "rchain" | "rnode" => Some(NodeDialect::Rchain),
+            _ => None,
+        }
+    }
+
+    /// The default shard id, when `settings.conf` does not name one. The root
+    /// shard is `root` on f1r3fly and `/root` on rchain.
+    pub fn default_shard_id(self) -> &'static str {
+        match self {
+            NodeDialect::F1r3fly => "root",
+            NodeDialect::Rchain => "/root",
+        }
+    }
+
+    /// The phlo bound quoted when the node offers no cost estimate: rchain has
+    /// no `/api/estimate-cost`, so a deploy's limit is a configured bound
+    /// rather than a measured price.
+    pub fn default_phlo_limit(self) -> i64 {
+        250_000
+    }
+
+    /// The phrasing for the deploy consent prompt: a measured price on
+    /// f1r3fly, a bound on rchain (which cannot estimate). The colon is part
+    /// of the phrase so the f1r3fly wording is unchanged.
+    pub fn cost_phrase(self) -> &'static str {
+        match self {
+            NodeDialect::F1r3fly => "Estimated cost:",
+            NodeDialect::Rchain => "Up to",
+        }
+    }
+}
+
+/// A client for one node, in one dialect.
+#[derive(Clone)]
+pub struct Node {
+    pub base: String,
+    pub dialect: NodeDialect,
+    http: Http,
+}
+
+fn enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+impl Node {
+    pub fn new(base: &str, dialect: NodeDialect, http: Http) -> Node {
+        Node {
+            base: base.trim_end_matches('/').to_string(),
+            dialect,
+            http,
+        }
+    }
+
+    /// One JSON request; on a non-2xx, the node's message from the body.
+    fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        let r = self
+            .http
+            .send(&HttpRequest {
+                url: format!("{}{}", self.base, path),
+                method: method.into(),
+                headers: vec![("content-type".into(), "application/json".into()), ("accept".into(), "application/json".into())],
+                body: body.map(|b| b.to_string().into_bytes()).unwrap_or_default(),
+            })
+            .map_err(|e| format!("{}: {e}", self.base))?;
+        let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::String(String::from_utf8_lossy(&r.body).into()));
+        if (200..300).contains(&r.status) {
+            Ok(v)
+        } else {
+            let msg = v.get("message").or_else(|| v.get("error")).map(|m| m.to_string()).unwrap_or_else(|| v.to_string());
+            Err(format!("{} {path}: HTTP {}: {msg}", self.base, r.status))
+        }
+    }
+
+    /// `GET /api/last-finalized-block` → `(block hash, block number)`, when the
+    /// node has a finalized fringe. 400s otherwise; the route and the
+    /// `blockInfo` envelope are the same on both nodes.
+    fn finalized_head(&self) -> Result<(String, i64), String> {
+        let v = self.call("GET", "/api/last-finalized-block", None)?;
+        let bi = v.get("blockInfo").unwrap_or(&v);
+        let h = bi.get("blockHash").and_then(|x| x.as_str()).ok_or("no blockHash")?.to_string();
+        let n = bi.get("blockNumber").and_then(|x| x.as_i64()).unwrap_or(0);
+        Ok((h, n))
+    }
+
+    /// `(block hash, block number)` anchoring every read and deploy.
+    ///
+    /// f1r3fly finalizes, so this is its finalized fringe. rchain may have no
+    /// finalized fringe at all — a single-validator rnode proposes blocks that
+    /// never finalize — so there it falls back to the newest block.
+    pub fn last_finalized(&self) -> Result<(String, i64), String> {
+        match self.dialect {
+            NodeDialect::F1r3fly => self.finalized_head(),
+            NodeDialect::Rchain => rchain::last_finalized(self),
+        }
+    }
+
+    /// The node's own full shard id, from `GET /api/status`.
+    ///
+    /// A deploy whose `shardId` is not the node's is refused
+    /// (`Deploy shardId '…' is not as expected network shard '…'.`), so a
+    /// client reads it rather than guessing the spelling.
+    pub fn shard_id(&self) -> Result<String, String> {
+        let v = self.call("GET", "/api/status", None)?;
+        v.get("shardId").and_then(|s| s.as_str()).map(str::to_string).ok_or_else(|| "no shardId in status".into())
+    }
+
+    /// `POST /api/faucet` `{address}` → `(deploy id, amount in drops)`.
+    ///
+    /// Dev-mode only — the node signs the drip server-side from its own funded
+    /// deployer key, and answers 404 when there is no faucet. Discoverability
+    /// is `GET /api/v1/capabilities`'s `faucet` flag.
+    pub fn faucet(&self, address: &str) -> Result<(String, i64), String> {
+        let v = self.call("POST", "/api/faucet", Some(&serde_json::json!({ "address": address })))?;
+        let id = v.get("deployId").and_then(|s| s.as_str()).ok_or("no deployId in the faucet response")?.to_string();
+        Ok((id, v.get("amount").and_then(|a| a.as_i64()).unwrap_or(0)))
+    }
+
+    /// Registry entry at `uri`, at `block` (default: last finalized):
+    /// `(data, block hash, block number)`.
+    pub fn registry(&self, uri: &str, block: Option<&str>) -> Result<(Vec<Value>, String, i64), String> {
+        match self.dialect {
+            NodeDialect::F1r3fly => f1r3fly::registry(self, uri, block),
+            NodeDialect::Rchain => rchain::registry(self, uri, block),
+        }
+    }
+
+    /// Exploratory deploy at `block`'s post-state: `(values on return, block
+    /// hash, cost)`.
+    pub fn explore(&self, term: &str, block: &str) -> Result<(Vec<Value>, String, u64), String> {
+        match self.dialect {
+            NodeDialect::F1r3fly => f1r3fly::explore(self, term),
+            NodeDialect::Rchain => rchain::explore(self, term, block),
+        }
+    }
+
+    /// Data at a private unforgeable name, at `block`.
+    pub fn data_at_private(&self, hex: &str, block: &str) -> Result<Vec<Value>, String> {
+        match self.dialect {
+            NodeDialect::F1r3fly => f1r3fly::data_at_private(self, hex, block),
+            NodeDialect::Rchain => rchain::data_at_private(self, hex, block),
+        }
+    }
+
+    /// A cost estimate for `term`. rchain has no such endpoint (the bridge
+    /// quotes a configured bound in its place), so this errors there.
+    pub fn estimate_cost(&self, term: &str, deployer_hex: &str) -> Result<u64, String> {
+        match self.dialect {
+            NodeDialect::F1r3fly => f1r3fly::estimate_cost(self, term, deployer_hex),
+            NodeDialect::Rchain => Err("the rchain dialect has no estimate-cost endpoint".into()),
+        }
+    }
+
+    /// Submit; returns the node's message.
+    pub fn deploy(&self, d: &SignedDeploy) -> Result<String, String> {
+        match self.dialect {
+            NodeDialect::F1r3fly => f1r3fly::deploy(self, d),
+            NodeDialect::Rchain => rchain::deploy(self, d),
+        }
+    }
+
+    /// `(state, latest block)`; state is Finalized, Failed, Pending or Expired.
+    pub fn finalization(&self, sig_hex: &str) -> Result<(String, Option<String>), String> {
+        match self.dialect {
+            NodeDialect::F1r3fly => f1r3fly::finalization(self, sig_hex),
+            NodeDialect::Rchain => rchain::finalization(self, sig_hex),
+        }
+    }
+
+    /// The event stream's URL, when the node has one. rchain has no websocket,
+    /// so a caller that gets `None` polls instead.
+    pub fn events_url(&self) -> Option<String> {
+        match self.dialect {
+            NodeDialect::F1r3fly => Some(f1r3fly::events_url(self)),
+            NodeDialect::Rchain => None,
+        }
+    }
+}

@@ -9,7 +9,7 @@
 //! f1r3gaze --profile DIR ...         use DIR as the profile
 //! f1r3gaze wallet list|new [LABEL]|import FILE [LABEL]|export ADDRESS [FILE]
 //!                 |use ADDRESS|remove ADDRESS|balance [ADDRESS]
-//!                 |send TO AMOUNT [DESCRIPTION]
+//!                 |send TO AMOUNT [DESCRIPTION]|faucet [ADDRESS]
 //!                                    manage the wallets that pay for deploys
 //! f1r3gaze --version
 //! ```
@@ -67,18 +67,38 @@ fn wallet(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
         "remove" => w.remove(&Address::parse(&need(1, "an address")?)?)?,
         "balance" => {
             let a = chosen(1)?;
-            let s = w.state(&a)?;
-            println!("{a}  {}", s.balance);
-            for t in s.transfers.iter().rev().take(20) {
-                println!("  {}  {} -> {}  {}  {}", t.timestamp, t.from, t.to, t.amount, t.description.as_deref().unwrap_or(""));
+            // The rchain dialect reads the balance from the node's native
+            // `revVault`; the f1r3fly dialect reads it from Embers, which is
+            // also the only one that reports transfer history.
+            if eng.bridge.cfg.dialect == gaze_shard::NodeDialect::Rchain {
+                let (rung, drops) = eng.bridge.rev_balance(a.as_str())?;
+                println!("{a}  {drops} drops ({})", rung.name());
+            } else {
+                let s = w.state(&a)?;
+                println!("{a}  {}", s.balance);
+                for t in s.transfers.iter().rev().take(20) {
+                    println!("  {}  {} -> {}  {}  {}", t.timestamp, t.from, t.to, t.amount, t.description.as_deref().unwrap_or(""));
+                }
             }
         }
         "send" => {
             let from = w.active().ok_or("no active wallet")?;
             let to = Address::parse(&need(1, "a recipient")?)?;
             let amount: i64 = need(2, "an amount")?.parse().map_err(|_| "the amount must be a whole number")?;
-            let id = w.transfer(&from, &to, amount, arg(3))?;
-            println!("deploy {id}");
+            if eng.bridge.cfg.dialect == gaze_shard::NodeDialect::Rchain {
+                // Amounts in the smallest unit (1 REV = 10^8 drops), as the
+                // node's `revVault` takes them.
+                let d = eng.bridge.rev_transfer(to.as_str(), amount)?;
+                println!("deploy {}", d.id());
+            } else {
+                let id = w.transfer(&from, &to, amount, arg(3))?;
+                println!("deploy {id}");
+            }
+        }
+        "faucet" => {
+            let a = chosen(1)?;
+            let (id, drops) = eng.bridge.faucet(a.as_str())?;
+            println!("{a}  funded {drops} drops  deploy {id}");
         }
         other => return Err(format!("unknown wallet command {other}")),
     }

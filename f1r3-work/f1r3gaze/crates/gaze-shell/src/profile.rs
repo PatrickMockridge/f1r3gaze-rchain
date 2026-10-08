@@ -1,7 +1,7 @@
 //! The profile: where F1R3Gaze keeps grants, keys, stores, cache and
 //! settings, and the settings themselves (`settings.conf`, `key = value`).
 
-use gaze_shard::ShardConfig;
+use gaze_shard::{NodeDialect, ShardConfig};
 use std::path::{Path, PathBuf};
 
 pub fn default_dir() -> PathBuf {
@@ -53,10 +53,12 @@ impl Default for Settings {
 
 pub const TEMPLATE: &str = "# F1R3Gaze settings. Lists are comma-separated.
 # home = gaze://newtab
+# dialect = f1r3fly            # f1r3fly | rchain
 # observers = https://observer-1.example, https://observer-2.example, https://observer-3.example
 # validator = https://validator.example
-# shard_id = root
+# shard_id = root              # the rchain dialect defaults to /root
 # quorum = 2
+# phlo_limit = 250000          # the deploy bound quoted when there is no cost estimate (rchain)
 # mirrors = https://cdn.example/blob/
 # https_only = false
 # Wallet balances, history and transfers (the Embers service F1R3Sky uses):
@@ -68,6 +70,7 @@ impl Settings {
     pub fn parse(text: &str) -> Settings {
         let mut s = Settings::default();
         let list = |v: &str| v.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>();
+        let mut shard_id_seen = false;
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('#') {
@@ -77,11 +80,20 @@ impl Settings {
             let v = v.trim();
             match k.trim() {
                 "home" => s.home = v.into(),
+                "dialect" => {
+                    if let Some(d) = NodeDialect::parse(v) {
+                        s.shard.dialect = d;
+                    }
+                }
                 "observers" => s.shard.observers = list(v),
                 "validator" => s.shard.validator = v.into(),
-                "shard_id" => s.shard.shard_id = v.into(),
+                "shard_id" => {
+                    s.shard.shard_id = v.into();
+                    shard_id_seen = true;
+                }
                 "quorum" => s.shard.quorum = v.parse().unwrap_or(2),
                 "phlo_price" => s.shard.phlo_price = v.parse().unwrap_or(1),
+                "phlo_limit" => s.shard.phlo_limit = v.parse().unwrap_or(s.shard.phlo_limit),
                 "mirrors" => s.mirrors = list(v),
                 "cache_bytes" => s.cache_bytes = v.parse().unwrap_or(s.cache_bytes),
                 "store_quota" => s.store_quota = v.parse().unwrap_or(s.store_quota),
@@ -90,6 +102,11 @@ impl Settings {
                 "max_fee" => s.max_fee = v.parse().unwrap_or(s.max_fee),
                 _ => {}
             }
+        }
+        // The root shard is `root` on f1r3fly and `/root` on rchain; apply the
+        // dialect's default unless the profile named one.
+        if !shard_id_seen {
+            s.shard.shard_id = s.shard.dialect.default_shard_id().into();
         }
         s
     }
@@ -137,5 +154,21 @@ mod tests {
         assert_eq!(s.shard.quorum, 3);
         assert_eq!(s.home, "gaze://newtab");
         assert!(s.https_only);
+    }
+
+    #[test]
+    fn dialect_sets_the_shard_default() {
+        // Default dialect is f1r3fly, whose root shard is `root`.
+        assert_eq!(Settings::parse("").shard.shard_id, "root");
+        assert_eq!(Settings::default().shard.dialect, NodeDialect::F1r3fly);
+        // rchain's root shard is `/root`, applied when the profile names none.
+        let r = Settings::parse("dialect = rchain");
+        assert_eq!(r.shard.dialect, NodeDialect::Rchain);
+        assert_eq!(r.shard.shard_id, "/root");
+        // An explicit shard_id wins over the dialect default.
+        let e = Settings::parse("dialect = rchain\nshard_id = demo");
+        assert_eq!(e.shard.shard_id, "demo");
+        // An unknown dialect is ignored, leaving the default.
+        assert_eq!(Settings::parse("dialect = bogus").shard.dialect, NodeDialect::F1r3fly);
     }
 }

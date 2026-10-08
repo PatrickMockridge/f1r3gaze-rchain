@@ -1,9 +1,9 @@
 //! The bridge: shared state ([`Bridge`]) and one [`ShardService`] per tab.
 
-use crate::deploy::{DeployData, SignedDeploy, public_key, sign};
+use crate::deploy::{DeployData, SignedDeploy, public_key, sign_for};
 use crate::expr::to_norm;
 use crate::keys::fresh_key;
-use crate::node::Node;
+use crate::node::{Node, NodeDialect};
 use crate::site::{SiteAddr, SiteManifest};
 use crate::term::render;
 use gaze_blob::{BlobSource, Blobs};
@@ -29,6 +29,10 @@ pub struct ShardConfig {
     pub phlo_price: i64,
     /// The profile's user id, part of every site key's identity.
     pub user: String,
+    /// Which node the observers and validator speak to.
+    pub dialect: NodeDialect,
+    /// The phlo bound quoted when the node offers no cost estimate (rchain).
+    pub phlo_limit: i64,
 }
 
 impl Default for ShardConfig {
@@ -40,6 +44,8 @@ impl Default for ShardConfig {
             quorum: 2,
             phlo_price: 1,
             user: "default".into(),
+            dialect: NodeDialect::F1r3fly,
+            phlo_limit: NodeDialect::F1r3fly.default_phlo_limit(),
         }
     }
 }
@@ -77,13 +83,16 @@ fn collapse(vs: &[Value]) -> Norm {
     }
 }
 
-/// Notifies subscribers of `block-finalised` events from `/ws/events`,
-/// reconnecting with backoff. Subscribers that fall silent are dropped.
+/// Notifies subscribers when a block is finalized: from `block-finalised`
+/// events on `/ws/events` where the node has a stream, or by polling the last
+/// finalized block where it does not (rchain). Subscribers that fall silent
+/// are dropped.
 pub struct EventHub {
     subs: Mutex<Vec<Sender<()>>>,
 }
 
 impl EventHub {
+    /// An event-stream source (the f1r3fly dialect).
     pub fn start(url: String) -> Arc<EventHub> {
         let hub = Arc::new(EventHub { subs: Mutex::new(Vec::new()) });
         let h = Arc::clone(&hub);
@@ -106,6 +115,35 @@ impl EventHub {
                 }
                 std::thread::sleep(Duration::from_secs(backoff));
                 backoff = (backoff * 2).min(60);
+            }
+        });
+        hub
+    }
+
+    /// A poll source, for a node with no event stream (the rchain dialect):
+    /// notify when the last finalized block hash changes, backing off while
+    /// the chain has no finalized block yet (a fresh node 400s there).
+    pub fn start_polling(node: Node, tick: Duration) -> Arc<EventHub> {
+        let hub = Arc::new(EventHub { subs: Mutex::new(Vec::new()) });
+        let h = Arc::clone(&hub);
+        let _ = std::thread::Builder::new().name("gaze-shard-events".into()).spawn(move || {
+            let mut backoff = tick;
+            let mut last: Option<String> = None;
+            loop {
+                if Arc::strong_count(&h) == 1 {
+                    return; // nobody left
+                }
+                match node.last_finalized() {
+                    Ok((hash, _)) => {
+                        if last.as_deref() != Some(hash.as_str()) {
+                            last = Some(hash);
+                            h.notify();
+                        }
+                        backoff = tick;
+                    }
+                    Err(_) => backoff = (backoff * 2).min(Duration::from_secs(60)),
+                }
+                std::thread::sleep(backoff);
             }
         });
         hub
@@ -166,7 +204,14 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(cfg: ShardConfig, http: Http, pool: Pool, payer: Arc<dyn Payer>, blobs: Arc<Blobs>) -> Arc<Bridge> {
-        let events = cfg.observers.first().map(|o| EventHub::start(Node::new(o, http.clone()).events_url()));
+        let events = cfg.observers.first().map(|o| {
+            let node = Node::new(o, cfg.dialect, http.clone());
+            match node.events_url() {
+                Some(url) => EventHub::start(url),
+                // No event stream: poll the last finalized block instead.
+                None => EventHub::start_polling(node, Duration::from_secs(5)),
+            }
+        });
         Arc::new(Bridge {
             cfg,
             http,
@@ -179,10 +224,10 @@ impl Bridge {
     }
 
     fn observers(&self) -> Vec<Node> {
-        self.cfg.observers.iter().map(|o| Node::new(o, self.http.clone())).collect()
+        self.cfg.observers.iter().map(|o| Node::new(o, self.cfg.dialect, self.http.clone())).collect()
     }
     fn validator(&self) -> Node {
-        Node::new(&self.cfg.validator, self.http.clone())
+        Node::new(&self.cfg.validator, self.cfg.dialect, self.http.clone())
     }
 
     /// Ask every observer the same question at the same finalized block and
@@ -246,7 +291,7 @@ impl Bridge {
     }
 
     pub fn explore(&self, term: &str) -> Result<(Rung, Norm), String> {
-        let (rung, v, _) = self.graded(&|o, _| o.explore(term).map(|(d, _, _)| collapse(&d)))?;
+        let (rung, v, _) = self.graded(&|o, b| o.explore(term, b).map(|(d, _, _)| collapse(&d)))?;
         Ok((rung, v))
     }
 
@@ -272,14 +317,27 @@ impl Bridge {
     }
 
     pub fn estimate(&self, term: &str, key: &SigningKey) -> Result<u64, String> {
+        // rchain has no estimate-cost endpoint: quote the configured bound
+        // instead, and the consent prompt says "up to".
+        if self.cfg.dialect == NodeDialect::Rchain {
+            return Ok(self.cfg.phlo_limit.max(0) as u64);
+        }
         let obs = self.observers();
         obs.first().ok_or("no observers")?.estimate_cost(term, &hex(&public_key(key)))
     }
 
     pub fn sign_and_deploy(&self, key: &SigningKey, term: &str, phlo_limit: i64) -> Result<SignedDeploy, String> {
-        let (_, num) = self.validator().last_finalized()?;
+        let v = self.validator();
+        let (_, num) = v.last_finalized()?;
+        // The node refuses a deploy whose shard id is not its own; rchain
+        // reports its own full id on `/api/status`, so read it rather than
+        // trusting the profile's spelling.
+        let shard_id = match self.cfg.dialect {
+            NodeDialect::F1r3fly => self.cfg.shard_id.clone(),
+            NodeDialect::Rchain => v.shard_id().unwrap_or_else(|_| self.cfg.shard_id.clone()),
+        };
         let now = now_ms();
-        let d = sign(
+        let d = sign_for(
             key,
             DeployData {
                 term: term.to_string(),
@@ -287,10 +345,15 @@ impl Bridge {
                 phlo_price: self.cfg.phlo_price,
                 phlo_limit,
                 valid_after_block_number: num,
-                shard_id: self.cfg.shard_id.clone(),
-                // Replay protection besides the timestamp and block bound.
-                expiration_timestamp: Some(now + 5 * 60 * 1000),
+                shard_id,
+                // Replay protection besides the timestamp and block bound. The
+                // rchain proto has no field for it, so it is omitted there.
+                expiration_timestamp: match self.cfg.dialect {
+                    NodeDialect::F1r3fly => Some(now + 5 * 60 * 1000),
+                    NodeDialect::Rchain => None,
+                },
             },
+            self.cfg.dialect,
         )?;
         self.validator().deploy(&d)?;
         Ok(d)
@@ -298,6 +361,31 @@ impl Bridge {
 
     pub fn finalization(&self, id: &str) -> Result<(String, Option<String>), String> {
         self.validator().finalization(id)
+    }
+
+    /// The REV balance of `addr`, read by an exploratory deploy of the native
+    /// `revVault` `getBalance`, graded like every other read.
+    pub fn rev_balance(&self, addr: &str) -> Result<(Rung, u64), String> {
+        let term = crate::wallet::balance_term(addr);
+        let (rung, v, _) = self.graded(&|o, b| o.explore(&term, b).map(|(d, _, _)| collapse(&d)))?;
+        Ok((rung, crate::wallet::parse_balance(&v)?))
+    }
+
+    /// Transfer `drops` REV from the payer's vault to `addr`, as a signed
+    /// deploy. The source is the payer's `deployerId`, so the payer's key is
+    /// the only authority involved.
+    pub fn rev_transfer(&self, to: &str, drops: i64) -> Result<SignedDeploy, String> {
+        if self.cfg.dialect != NodeDialect::Rchain {
+            return Err("REV transfers are the rchain dialect's; the f1r3fly wallet goes through Embers".into());
+        }
+        let (key, _) = self.payer.payer()?;
+        let term = crate::wallet::transfer_term(to, drops);
+        self.sign_and_deploy(&key, &term, crate::wallet::TRANSFER_PHLO_LIMIT)
+    }
+
+    /// Fund `addr` from the node's devnet faucet: `(deploy id, drops)`.
+    pub fn faucet(&self, addr: &str) -> Result<(String, i64), String> {
+        self.validator().faucet(addr)
     }
 }
 
@@ -476,8 +564,9 @@ impl ShardService {
                                     Prompt {
                                         id,
                                         text: format!(
-                                            "{site} wants to deploy program {} to the shard. Estimated cost: {cost} phlo, paid from your wallet {}{bal}.",
+                                            "{site} wants to deploy program {} to the shard. {} {cost} phlo, paid from your wallet {}{bal}.",
                                             &hex(&h)[..12],
+                                            b.cfg.dialect.cost_phrase(),
                                             short(&addr)
                                         ),
                                     },
