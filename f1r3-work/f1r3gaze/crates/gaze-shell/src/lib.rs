@@ -9,6 +9,7 @@
 //!   `RhoDocument` as a sub-document.
 //! * [`headless`]: the same pipeline without a window.
 
+pub mod devnet;
 pub mod engine;
 pub mod headless;
 pub mod pages;

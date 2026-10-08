@@ -21,6 +21,7 @@ pub mod node;
 pub mod pos;
 pub mod site;
 pub mod term;
+pub mod txn;
 pub mod wallet;
 
 pub use bridge::{Bridge, DriveSource, EventHub, KeyPayer, Payer, Prompt, Rung, ShardConfig, ShardOut, ShardService};

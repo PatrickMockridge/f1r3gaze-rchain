@@ -161,6 +161,19 @@ pub fn public_key(k: &SigningKey) -> Vec<u8> {
     k.verifying_key().to_encoded_point(false).as_bytes().to_vec()
 }
 
+/// The 65-byte uncompressed public key (hex) for a base16 secp256k1 private key.
+///
+/// A genesis `bonds.txt` names this, and `wallets.txt` names its REV address — two files that have to
+/// agree about one key, which is why this is derived rather than pasted.
+pub fn public_key_hex(private_hex: &str) -> Result<String, String> {
+    let bytes: [u8; 32] = gaze_net::unhex(private_hex)
+        .ok_or("the private key is not hex")?
+        .try_into()
+        .map_err(|_| "a private key is 32 bytes")?;
+    let k = SigningKey::from_slice(&bytes).map_err(|e| e.to_string())?;
+    Ok(gaze_net::hex(&public_key(&k)))
+}
+
 pub fn sign_for(k: &SigningKey, data: DeployData, dialect: NodeDialect) -> Result<SignedDeploy, String> {
     let sig: Signature = k.sign_prehash(&data.signing_hash_for(dialect)).map_err(|e| e.to_string())?;
     let sig = sig.normalize_s().unwrap_or(sig);

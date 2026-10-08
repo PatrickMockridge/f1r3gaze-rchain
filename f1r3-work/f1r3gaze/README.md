@@ -26,6 +26,13 @@ f1r3gaze wallet new|import|export|use|list|balance|send|remove ...
 f1r3gaze chain block HASH | blocks [N] | find-deploy ID | finalized HASH
                | pool | caps | shards     [--json]
 f1r3gaze chain propose              force a block (needs `admin = …`)
+f1r3gaze chain txn open --leg SHARD:AMOUNT:TO [--leg ...] | status ID | list
+                                    a cross-shard transaction, coordinated by a
+                                    gateway node (the node moves its own REV)
+f1r3gaze devnet up|status|down [--shards N] [--rnode PATH] [--ocapn MODE]
+               [--data DIR] [--port-base N] [--fresh|--purge]
+                                    start a local rnode; `--shards 2` makes it a
+                                    gateway that coordinates cross-shard txns
 f1r3gaze pos status | delegations KEY | bonds | validators | trusted
                                              [--json]
                                     read the chain and its staking state
@@ -193,7 +200,7 @@ Three defects in the existing code were found and fixed on the way:
 
 ## Tests
 
-112 tests in this workspace, all passing — seven of them env-gated live tests
+116 tests in this workspace, all passing — eight of them env-gated live tests
 against a running `rnode` (CampF1R3 carries its own 181):
 
 | crate | tests | what they establish |
@@ -292,6 +299,7 @@ node:
 | delegation | — (no counterpart) | `delegate` / `undelegate` on a **named** operator, through the native `rho:rchain:pos` |
 | site publishing | `rho:registry:insertSigned` | `@"rho:serve:1:…"!(manifest)` plus the files in F1R3Drive's on-chain layout, as deploys |
 | propose (admin) | — (not wired) | `POST /api/propose`, on the admin port named by `admin = …` |
+| cross-shard txn | — (not wired) | `POST /api/v1/txn`, on a **gateway** node's admin port |
 
 Two things are lost on rchain, and are dialect-scoped rather than papered over:
 
@@ -345,6 +353,18 @@ blob would pass its own hash check. A channel accumulates, so re-publishing
 unchanged content is
 harmless (identical copies are one answer) while re-publishing *changed* content
 at one address is refused — a changed site takes a new range (`@^1` to `@^2`).
+
+**A local devnet** is `f1r3gaze devnet up`: it writes an `rnode.conf` for whichever rnode binary you
+point it at and supervises it, so `--rnode` is how an ERTP- or OCapN-bearing build is selected. With
+`--shards 2` the node is a member of `/root` and `/root/child1`, each with its own genesis, which makes
+it a **gateway** — a node that coordinates a cross-shard two-phase commit itself, reached as
+`POST /api/v1/txn` on the admin port. **A transaction moves the node's own REV**: the gateway signs
+every leg with its validator key and escrows out of that key's account, so `chain txn` asks a node to
+move funds between shards it owns — it is not a client-signed transfer. The genesis is the part that
+bites: `wallets.txt` funds the deployer and `bonds.txt` **bonds the validator**, and with the wallet
+alone the node bonds a *random* key set of its own, refuses to propose, and looks hung rather than
+misconfigured. A `genesis/wallets.txt` you write before `up` is kept, which is how a second funded
+account is added.
 
 Proven live: `crates/gaze-shard/tests/rchain_live.rs` deploys a program this
 crate signs against a running `rnode` and checks the node's reported deploy id

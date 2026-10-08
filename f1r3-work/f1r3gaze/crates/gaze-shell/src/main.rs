@@ -16,6 +16,11 @@
 //! f1r3gaze chain propose
 //!                                    force a block; needs the node's admin
 //!                                    address (`admin = …` in settings.conf)
+//! f1r3gaze chain txn open --leg SHARD:AMOUNT:TO [--leg …] [--id HEX]
+//! f1r3gaze chain txn status ID | list
+//!                                    a cross-shard transaction, coordinated by
+//!                                    a gateway node — the node moves its own
+//!                                    REV between its shards, not the caller's
 //! f1r3gaze pos status | delegations KEY | bonds | validators | trusted
 //!                                              [--json]
 //! f1r3gaze pos bond AMOUNT | unbond
@@ -29,8 +34,13 @@
 //!                [--entry NAME] [--mirror URL]...
 //!                                    publish a site's manifest to the shard and
 //!                                    read it back (the rchain dialect only);
-//!                                    the files go to the mirror you name, via
-//!                                    `f1r3c site`
+//!                                    the files go on-chain, in the layout this
+//!                                    client's own reader fetches from
+//! f1r3gaze devnet up|status|down [--shards N] [--rnode PATH] [--data DIR]
+//!                [--ocapn none|websocket|noise] [--port-base N] [--fresh|--purge]
+//!                                    start a local rnode: one node, `--shards 2`
+//!                                    makes it a gateway that coordinates a
+//!                                    cross-shard transaction itself
 //! f1r3gaze --version
 //! ```
 
@@ -142,6 +152,59 @@ fn chain(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
         // admin address (`admin = …` in settings.conf), because the listener
         // that acts with the node's own key is not the API one.
         "propose" => println!("{}", eng.bridge.propose()?),
+        // Cross-shard transactions, on the node's gateway — a node that is a
+        // member of several shards coordinates the two-phase commit itself.
+        "txn" => {
+            use gaze_shard::txn;
+            match a.get(1).copied().unwrap_or("list") {
+                "open" => {
+                    let (mut id, mut legs) = (None, Vec::new());
+                    let mut i = 2;
+                    while let Some(x) = a.get(i) {
+                        match *x {
+                            "--id" => {
+                                i += 1;
+                                id = Some(a.get(i).ok_or("--id needs a value")?.to_string());
+                            }
+                            "--leg" => {
+                                i += 1;
+                                legs.push(txn::parse_leg(a.get(i).ok_or("--leg needs SHARD:AMOUNT:TO")?)?);
+                            }
+                            other => return Err(format!("unknown txn option {other}")),
+                        }
+                        i += 1;
+                    }
+                    if legs.is_empty() {
+                        return Err("chain txn open needs at least one --leg SHARD:AMOUNT:TO".into());
+                    }
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    // Said once, where it matters: this is not the caller's money.
+                    println!("note: the gateway signs every leg with the node's own key, so this moves the node's REV between its shards.");
+                    let r = eng.bridge.txn_open(&txn::TxnRequest {
+                        txn_id: id.unwrap_or_else(|| txn::fresh_id(now)),
+                        legs,
+                    })?;
+                    print_txn(&r);
+                }
+                "status" => {
+                    let id = a.get(2).copied().ok_or("chain txn status needs a transaction id")?;
+                    print_txn(&eng.bridge.txn_status(id)?);
+                }
+                "list" => {
+                    let l = eng.bridge.txn_list()?;
+                    if l.in_flight.is_empty() {
+                        println!("no transactions in flight");
+                    }
+                    for r in &l.in_flight {
+                        print_txn(r);
+                    }
+                }
+                other => return Err(format!("unknown txn command {other}")),
+            }
+        }
         other => return Err(format!("unknown chain read {other}")),
     }
     Ok(())
@@ -240,6 +303,92 @@ fn pos(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
         other => return Err(format!("unknown pos read {other}")),
     }
     Ok(())
+}
+
+/// The local devnet. It starts a node rather than talking to one, so it takes no `Engine` — and it is
+/// the one subcommand here whose subject is the node's *configuration*.
+fn devnet(args: &[String]) -> Result<(), String> {
+    use gaze_shell::devnet::{self, Ocapn, Options};
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let cmd = a.first().copied().unwrap_or("status");
+    let rest: &[&str] = a.get(1..).unwrap_or(&[]);
+
+    let mut shards = 1u32;
+    let mut rnode = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join("RNodeRust/target/release/rnode"))
+        .unwrap_or_else(|| "rnode".into());
+    let mut data = profile::default_dir().join("devnet");
+    let mut ocapn = Ocapn::None;
+    let mut port_base = 0u16;
+    let mut fresh = false;
+    let mut purge = false;
+    let mut i = 0;
+    while let Some(x) = rest.get(i) {
+        match *x {
+            "--shards" => {
+                i += 1;
+                shards = rest.get(i).ok_or("--shards needs a count")?.parse().map_err(|_| "--shards wants a number")?;
+            }
+            "--rnode" => {
+                i += 1;
+                rnode = rest.get(i).ok_or("--rnode needs a path")?.into();
+            }
+            "--data" => {
+                i += 1;
+                data = rest.get(i).ok_or("--data needs a directory")?.into();
+            }
+            "--ocapn" => {
+                i += 1;
+                ocapn = Ocapn::parse(rest.get(i).ok_or("--ocapn needs a mode")?).ok_or("--ocapn is none, websocket or noise")?;
+            }
+            "--port-base" => {
+                i += 1;
+                port_base = rest.get(i).ok_or("--port-base needs a number")?.parse().map_err(|_| "--port-base wants a number")?;
+            }
+            "--fresh" => fresh = true,
+            "--purge" => purge = true,
+            other => return Err(format!("unknown devnet option {other}")),
+        }
+        i += 1;
+    }
+
+    match cmd {
+        "up" => {
+            // The keys are throwaway dev keys, exactly as `tools/devnet.sh` says of its own.
+            println!("devnet keys are fixed throwaways for a local chain — never fund them.");
+            devnet::up(&Options {
+                shards,
+                rnode,
+                data,
+                ocapn,
+                port_base,
+                fresh,
+            })?;
+        }
+        "status" => devnet::status(&data, port_base)?,
+        "down" => devnet::down(&data, purge)?,
+        other => return Err(format!("unknown devnet command {other}")),
+    }
+    Ok(())
+}
+
+fn print_txn(r: &gaze_shard::txn::TxnRecord) {
+    println!(
+        "{}  {}  {}",
+        r.txn_id,
+        r.state,
+        if r.is_terminal() { "(decided)" } else { "(in flight)" }
+    );
+    for l in &r.legs {
+        println!("  leg   {}  {} -> {}", l.shard_id, l.amount, l.to);
+    }
+    for v in &r.votes {
+        println!("  vote  {}  {}", v.shard_id, v.vote);
+    }
+    if let Some(why) = &r.reason {
+        println!("  reason: {why}");
+    }
 }
 
 fn site(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
@@ -408,6 +557,16 @@ fn main() {
             "--timeout" => opts.timeout = Duration::from_secs(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
             "--log" => log = Some(args.next().unwrap_or_else(|| usage())),
             "--wait" => opts.wait = Duration::from_secs(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
+            // Before the group below: a devnet starts a node rather than talking to one, so it takes
+            // no `Engine` and must not open a profile.
+            "devnet" => {
+                let rest: Vec<String> = args.by_ref().collect();
+                if let Err(e) = devnet(&rest) {
+                    eprintln!("f1r3gaze: {e}");
+                    std::process::exit(1);
+                }
+                return;
+            }
             "wallet" | "chain" | "pos" | "site" => {
                 let which = a.clone();
                 let rest: Vec<String> = args.by_ref().collect();

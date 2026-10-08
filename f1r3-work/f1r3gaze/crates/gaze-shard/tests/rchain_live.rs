@@ -27,6 +27,13 @@ const RECIPIENT: &str = "11112VYAt8rUGNRRZX3eJdgagaAhtWTK8Js7F7X5iqddMVqyDTtYau"
 /// `before`/`after` the transfer assertion measures (including across runs).
 const FAUCET_TO: &str = "11112dz5hKK18bRqrfY5puLbKURCjKEhf2KrDDwZDufqiAuVqDrkMS";
 
+/// The transfer test's own recipient, touched by nothing else.
+///
+/// `RECIPIENT` is the **node's own address** on a devnet the launcher starts, so its balance moves
+/// with the node's own activity — the gateway moves REV between shards with it — and an exact-delta
+/// assertion against it measures all of that, not the transfer under test.
+const TRANSFER_TO: &str = "11112oK2fv3B4ZHyjVgT5CsahvRjEeJrjpZ4DSrbGqp9xo5GHHTafg";
+
 fn base_and_key() -> Option<(String, k256::ecdsa::SigningKey)> {
     let base = std::env::var("RCHAIN_NODE").ok()?;
     let hex = std::env::var("RCHAIN_DEPLOYER_KEY").ok()?;
@@ -152,17 +159,29 @@ fn the_rchain_wallet_reads_and_moves_rev() {
     };
     let b = bridge(&base, key);
 
-    let before = b.rev_balance(RECIPIENT).expect("balance").1;
-    eprintln!("balance of {RECIPIENT} before: {before}");
+    // TRANSFER_TO, not RECIPIENT: an exact delta is only meaningful against an address nothing
+    // else moves, and on a launcher devnet RECIPIENT is the node's own.
+    let before = b.rev_balance(TRANSFER_TO).expect("balance").1;
+    eprintln!("balance of {TRANSFER_TO} before: {before}");
 
-    let d = b.rev_transfer(RECIPIENT, 1000).expect("transfer");
+    let d = b.rev_transfer(TRANSFER_TO, 1000).expect("transfer");
     eprintln!("transfer deploy {}", d.id());
     let state = settle(&b, &d.id());
     eprintln!("transfer state: {state}");
     assert_eq!(state, "Finalized", "the transfer must be included and finalize");
 
-    let after = b.rev_balance(RECIPIENT).expect("balance").1;
-    eprintln!("balance of {RECIPIENT} after: {after}");
+    // The credit can land a block after the deploy is reported settled — the status and the state at
+    // a pinned block are answered from different places — so read until it does.
+    let t0 = Instant::now();
+    let mut after = before;
+    while t0.elapsed() < Duration::from_secs(30) {
+        after = b.rev_balance(TRANSFER_TO).expect("balance").1;
+        if after != before {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    eprintln!("balance of {TRANSFER_TO} after: {after}");
     assert_eq!(after, before + 1000, "the transfer moved exactly 1000 drops");
 
     // The faucet signs server-side, so it needs no key from us.
@@ -187,7 +206,10 @@ fn the_rchain_reads_answer_a_live_node() {
     assert_eq!(bi.block_info.block_number, num, "the block read returns the anchor");
     let (_, bs) = b.blocks(Blocks::Depth(5)).expect("blocks");
     assert!(!bs.is_empty());
-    assert!(bs[0].block_number <= num + 1, "the newest block is at or just past the anchor");
+    // At or *past* the anchor, never behind it — and past it is now the normal case: the chain is
+    // moving under the test (a devnet autoproposes), so an upper bound here would be asserting the
+    // node is idle.
+    assert!(bs[0].block_number >= num, "the newest block is at or past the anchor ({num})");
 
     // Finality is a *local view*, and a single-validator net finalizes nothing,
     // so assert only that the read answers -- never what it says.
@@ -243,8 +265,15 @@ fn the_rchain_staking_write_reports_the_nodes_refusal() {
     eprintln!("bond deploy {}", d.id());
     let answer = b.pos_settle(&d.id()).expect("the deploy settles");
     eprintln!("bond as the bonded validator -> {answer:?}");
-    let reason = answer.expect_err("an already-bonded key cannot bond again");
-    assert!(reason.contains("already bonded"), "unexpected refusal: {reason}");
+    let reason = answer.expect_err("a key that cannot bond answers with a refusal");
+    // **Which** refusal is the environment's, not the client's: on a devnet where the payer *is* the
+    // bonded validator it is "Public key is already bonded."; where the payer is funded but not the
+    // validator, the trust gate refuses first ("Validator is not trusted: observer admission is
+    // required before bonding."). Both are the bond path running end to end, which is the claim.
+    assert!(
+        reason.contains("already bonded") || reason.contains("not trusted"),
+        "the answer is one of the node's own bond refusals, not a transport failure: {reason}"
+    );
 }
 
 /// The delegation writes, proven **without mutating** the dev chain.
@@ -363,9 +392,21 @@ fn publishing_a_site_round_trips_on_a_live_node() {
     changed.mirrors = vec!["https://elsewhere.invalid/".into()];
     let cd = b.publish_site(&uri, &changed).expect("the deploy is accepted");
     b.settle(&cd.id()).expect("it settles");
-    let e = b.resolve_site(&addr).expect_err("two different manifests at one address");
-    eprintln!("changed manifest refused: {e}");
-    assert!(e.contains("different values"), "{e}");
+    // The second datum lags the block a read pins, exactly as the first one does, so wait for the
+    // refusal rather than demanding it on the first read.
+    let t0 = Instant::now();
+    let mut refusal = String::new();
+    while t0.elapsed() < Duration::from_secs(30) {
+        match b.resolve_site(&addr) {
+            Err(e) if e.contains("different values") => {
+                refusal = e;
+                break;
+            }
+            _ => std::thread::sleep(Duration::from_secs(2)),
+        }
+    }
+    eprintln!("changed manifest refused: {refusal}");
+    assert!(refusal.contains("different values"), "two manifests at one address are refused, not picked");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -416,4 +457,56 @@ fn proposing_reaches_the_admin_listener_on_a_live_node() {
     // And without an admin address nothing is sent anywhere.
     let no_admin = bridge(&base, key);
     assert!(no_admin.propose().unwrap_err().contains("admin = "));
+}
+
+/// A cross-shard transaction on a **gateway** node — one that is a member of several shards, which is
+/// what `f1r3gaze devnet up --shards 2` starts.
+///
+/// Skipped against a single-shard node: there is no gateway, the route answers 404, and there is
+/// nothing to transact *across*. The node decides before it answers, so a terminal state is the
+/// expectation rather than something to poll for.
+#[test]
+fn a_cross_shard_txn_commits_on_a_gateway_node() {
+    use gaze_shard::txn;
+    let Some((base, key)) = base_and_key() else {
+        eprintln!("RCHAIN_NODE unset; skipping the live cross-shard test");
+        return;
+    };
+    let admin = std::env::var("RCHAIN_ADMIN").unwrap_or_else(|_| "http://127.0.0.1:40405".into());
+    let b = bridge_admin(&base, key, Some(admin));
+
+    let ids: Vec<String> = match b.shards() {
+        Ok((_, s)) if s.shard_count >= 2 => s.shards.iter().map(|x| x.shard_id.clone()).collect(),
+        _ => {
+            eprintln!("fewer than two shards; skipping the cross-shard test");
+            return;
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let req = txn::TxnRequest {
+        txn_id: txn::fresh_id(now),
+        legs: ids
+            .iter()
+            .take(2)
+            .map(|id| txn::TxnLeg {
+                shard_id: id.clone(),
+                amount: 10,
+                to: RECIPIENT.into(),
+            })
+            .collect(),
+    };
+
+    let r = b.txn_open(&req).expect("the gateway answers");
+    eprintln!("txn {} -> {} ({:?})", r.txn_id, r.state, r.reason);
+    assert!(r.is_terminal(), "the node decides before it answers: {r:?}");
+    assert_eq!(r.state, "committed", "both legs prepare on a healthy devnet: {r:?}");
+    assert!(r.all_ready(), "a commit is every leg ready: {r:?}");
+
+    // And the decision is durable: the record is readable back by id.
+    let back = b.txn_status(&r.txn_id).expect("the record is kept");
+    assert_eq!(back.state, r.state);
+    assert_eq!(back.record_hash, r.record_hash, "the same content-addressed decision");
 }

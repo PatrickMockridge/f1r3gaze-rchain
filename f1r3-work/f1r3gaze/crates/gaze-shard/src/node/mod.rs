@@ -13,8 +13,21 @@ mod rchain;
 use crate::chain::{self, Blocks};
 use crate::deploy::SignedDeploy;
 use crate::pos;
+use crate::txn::{self, TxnRequest};
 use gaze_net::{Http, HttpRequest};
 use serde_json::Value;
+
+/// The refusal for an admin-surface method that is wired for rnode only.
+///
+/// It says *unverified* rather than "f1r3fly has no such route", because nobody has run an f1r3fly
+/// node here: a route that exists and one that does not would both look like this, and a claim either
+/// way would be a guess.
+fn unverified_on_f1r3fly(what: &str) -> String {
+    format!(
+        "{what} is wired for the rchain dialect only: its admin route has not been verified against a \
+         real f1r3fly node"
+    )
+}
 
 /// The one refusal the f1r3fly dialect gives the chain and staking reads. It is
 /// produced *without touching the wire* — the f1r3fly arm never calls
@@ -295,14 +308,49 @@ impl Node {
                 let v = self.call("POST", "/api/propose", None)?;
                 Ok(v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
             }
-            // Deliberately not the usual "f1r3fly has no such route": nobody has
-            // run an f1r3fly node here, so what is true is that this is unproven,
-            // and a refusal that says so is better than a claim either way.
-            NodeDialect::F1r3fly => Err(
-                "propose is wired for the rchain dialect only: its admin route has not been \
-                 verified against a real f1r3fly node"
-                    .into(),
-            ),
+            NodeDialect::F1r3fly => Err(unverified_on_f1r3fly("propose")),
+        }
+    }
+
+    // --- the gateway's cross-shard transaction API (rchain only) ------------
+    //
+    // Like `propose`, these are on the **admin** listener, so a `Node` built from the API base will
+    // not find them; `Bridge::txn_*` builds the right one. They are the *gateway's* surface: a node
+    // that is a member of several shards drives the transaction itself, signing every leg with its
+    // own validator key.
+
+    /// Open a transaction. The node coordinates it: it prepares each leg on the shard that owns it,
+    /// collects the votes, and commits all or aborts the prepared legs.
+    pub fn txn_open(&self, req: &TxnRequest) -> Result<txn::TxnRecord, String> {
+        match self.dialect {
+            NodeDialect::Rchain => {
+                let body = serde_json::to_value(req).map_err(|e| e.to_string())?;
+                let v = self.call("POST", "/api/v1/txn", Some(&body))?;
+                serde_json::from_value(v).map_err(|e| format!("txn: {e}"))
+            }
+            NodeDialect::F1r3fly => Err(unverified_on_f1r3fly("the cross-shard transaction API")),
+        }
+    }
+
+    /// One transaction's record, by id.
+    pub fn txn_status(&self, id: &str) -> Result<txn::TxnRecord, String> {
+        match self.dialect {
+            NodeDialect::Rchain => {
+                let v = self.call("GET", &format!("/api/v1/txn/{}", enc(id)), None)?;
+                serde_json::from_value(v).map_err(|e| format!("txn: {e}"))
+            }
+            NodeDialect::F1r3fly => Err(unverified_on_f1r3fly("the cross-shard transaction API")),
+        }
+    }
+
+    /// The transactions this node still holds.
+    pub fn txn_list(&self) -> Result<txn::TxnList, String> {
+        match self.dialect {
+            NodeDialect::Rchain => {
+                let v = self.call("GET", "/api/v1/txn", None)?;
+                serde_json::from_value(v).map_err(|e| format!("txn: {e}"))
+            }
+            NodeDialect::F1r3fly => Err(unverified_on_f1r3fly("the cross-shard transaction API")),
         }
     }
 

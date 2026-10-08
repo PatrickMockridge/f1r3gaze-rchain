@@ -7,6 +7,7 @@ use crate::keys::fresh_key;
 use crate::node::{Node, NodeDialect};
 use crate::pos;
 use crate::site::{SiteAddr, SiteManifest};
+use crate::txn;
 use crate::term::render;
 use gaze_blob::{BlobSource, Blobs};
 use gaze_knf::Knf;
@@ -615,12 +616,41 @@ impl Bridge {
     ///
     /// Not a page verb, and not on `f1r3fly` — see [`Node::propose`].
     pub fn propose(&self) -> Result<String, String> {
-        let admin = self
+        self.admin()?.propose()
+    }
+
+    /// The node's admin listener, when one is configured.
+    ///
+    /// It is where the operations that act with the node's **own key** live: `propose`, and the
+    /// gateway's cross-shard transactions. There is no default, because the admin port is a
+    /// deployment's business and guessing would aim a privileged request somewhere unintended.
+    fn admin(&self) -> Result<Node, String> {
+        let a = self
             .cfg
             .admin
             .as_ref()
             .ok_or("no admin address: set `admin = http://host:40405` in settings.conf")?;
-        Node::new(admin, self.cfg.dialect, self.http.clone()).propose()
+        Ok(Node::new(a, self.cfg.dialect, self.http.clone()))
+    }
+
+    /// Open a cross-shard transaction on the node's gateway.
+    ///
+    /// **A transaction is the node moving its own funds.** The gateway signs every leg with its
+    /// validator key and escrows out of that key's own REV account, so this is not a client-signed
+    /// transfer: it asks a node that is a member of several shards to move REV between them. A node
+    /// that is a member of one shard has no gateway, and the route answers 404.
+    pub fn txn_open(&self, req: &txn::TxnRequest) -> Result<txn::TxnRecord, String> {
+        self.admin()?.txn_open(req)
+    }
+
+    /// One transaction's record, by id.
+    pub fn txn_status(&self, id: &str) -> Result<txn::TxnRecord, String> {
+        self.admin()?.txn_status(id)
+    }
+
+    /// The transactions this node still holds — in flight, and decided ones it keeps for recovery.
+    pub fn txn_list(&self) -> Result<txn::TxnList, String> {
+        self.admin()?.txn_list()
     }
 
     /// Wait for a deploy to settle and return its outcome.

@@ -93,6 +93,7 @@ fn mock_rchain_full(value: Value, num: i64, finalized: bool, pos_error: bool, de
             let mut r = BufReader::new(s.try_clone().unwrap());
             let mut line = String::new();
             r.read_line(&mut line).unwrap();
+            let method = line.split_whitespace().next().unwrap_or("").to_string();
             let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
             let mut len = 0;
             loop {
@@ -162,6 +163,32 @@ fn mock_rchain_full(value: Value, num: i64, finalized: bool, pos_error: bool, de
                 // The admin route. In these tests one listener answers both
                 // ports, so `admin = <base>` points here.
                 (200, json!("Success! Block 1234 created and added.").to_string())
+            } else if path.starts_with("/api/v1/txn") {
+                // The gateway's transaction API, also on the admin listener.
+                if method == "POST" {
+                    // Answer with a committed record built from the legs asked for, so a test can
+                    // assert both the request and the parse.
+                    let req: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    let legs = req.get("legs").cloned().unwrap_or(json!([]));
+                    let votes: Vec<Value> = legs
+                        .as_array()
+                        .map(|a| a.iter().map(|l| json!({"shardId": l["shardId"], "vote": "ready"})).collect())
+                        .unwrap_or_default();
+                    let rec = json!({
+                        "txnId": req.get("txnId").cloned().unwrap_or(json!("01")),
+                        "state": "committed",
+                        "coordinator": KEY,
+                        "recordHash": "ff",
+                        "legs": legs,
+                        "votes": votes,
+                        "reason": null,
+                    });
+                    (200, rec.to_string())
+                } else if path == "/api/v1/txn" {
+                    (200, json!({"inFlight": []}).to_string())
+                } else {
+                    (200, json!({"txnId": "01", "state": "aborted", "coordinator": KEY, "recordHash": "ee", "legs": [], "votes": [], "reason": "no route"}).to_string())
+                }
             } else if path.starts_with("/api/status") {
                 // The wallet reads the shard id here rather than guessing it.
                 (200, json!({"shardId": "/root", "latestBlockNumber": num, "minPhloPrice": 1}).to_string())
@@ -639,6 +666,12 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     assert!(br.publish_site("rho:serve:1:ab:p:^1", &site).is_err());
     assert!(br.publish_blobs(&[([0u8; 32], b"x".to_vec())]).is_err());
     assert!(br.propose().is_err());
+    // The gateway's transaction API is the same admin surface.
+    assert!(br.txn_list().is_err());
+    assert!(br.txn_status("0a").is_err());
+    assert!(br
+        .txn_open(&gaze_shard::txn::TxnRequest { txn_id: "0a".into(), legs: vec![] })
+        .is_err());
     // The wallet's balance read was ungated before this change and would have
     // shipped a term naming `rho:rchain:revVault` to an f1r3fly node.
     assert!(br.rev_balance(KEY).is_err());
@@ -849,4 +882,65 @@ fn propose_forces_a_block_and_needs_an_admin_address() {
         vlog.lock().unwrap().iter().any(|(p, _)| p == "/api/propose"),
         "the admin route was the one called"
     );
+}
+
+/// A cross-shard transaction goes to the **admin** listener, with both legs, and its record parses.
+#[test]
+fn a_cross_shard_txn_goes_to_the_admin_listener() {
+    use gaze_shard::txn;
+    let (base, vlog) = mock_rchain(manifest(), 10, true);
+    let cfg = ShardConfig {
+        dialect: NodeDialect::Rchain,
+        observers: vec![base.clone()],
+        validator: base.clone(),
+        quorum: 1,
+        admin: Some(base.clone()),
+        ..Default::default()
+    };
+    let d = std::env::temp_dir().join(format!("gaze-txn-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    let blobs = Arc::new(Blobs::new(ContentCache::new(d.join("blobs"), 1 << 20), Http::new()));
+    let br = Bridge::new(
+        cfg,
+        Http::new(),
+        Pool::new(2),
+        Arc::new(KeyPayer {
+            key: k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap(),
+            address: "1111test".into(),
+        }),
+        blobs,
+    );
+
+    let req = txn::TxnRequest {
+        txn_id: "0a".into(),
+        legs: vec![
+            txn::parse_leg("/root:100:addrA").unwrap(),
+            txn::parse_leg("/root/child1:250:addrB").unwrap(),
+        ],
+    };
+    let r = br.txn_open(&req).expect("the gateway answers");
+    assert_eq!(r.txn_id, "0a");
+    assert_eq!(r.state, "committed");
+    assert!(r.is_terminal() && r.all_ready(), "every leg voted ready");
+    assert_eq!(r.legs.len(), 2);
+    assert_eq!(r.legs[1].shard_id, "/root/child1");
+    assert_eq!(r.legs[1].amount, 250);
+
+    // The body carried both legs, each naming the shard that owns it.
+    let body = vlog
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(p, _)| p == "/api/v1/txn")
+        .cloned()
+        .expect("POST /api/v1/txn")
+        .1;
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["txnId"], "0a");
+    assert_eq!(v["legs"][0]["shardId"], "/root");
+    assert_eq!(v["legs"][1]["shardId"], "/root/child1");
+    assert_eq!(v["legs"][1]["to"], "addrB");
+
+    // And the in-flight list is an empty list, not an error.
+    assert!(br.txn_list().unwrap().in_flight.is_empty());
 }
