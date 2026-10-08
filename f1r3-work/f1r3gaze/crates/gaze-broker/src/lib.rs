@@ -142,14 +142,27 @@ pub enum ShardClass {
     /// global state that is not the site's, so it is asked for once and
     /// remembered only if allowed.
     Chain,
+    /// Change the payer's own stake — bond REV or stage an unbond.
+    ///
+    /// The verbs are locked to the payer's key: the term passes the
+    /// `rho:rchain:deployerId` capability the node binds, never a page-supplied
+    /// one, so a consenting page can lock the payer's REV or stage an unbond
+    /// but cannot send funds anywhere or touch another key. Never seeded.
+    Stake,
 }
 
 impl ShardClass {
     /// Every class. **The length is a literal**, so growing the enum without
     /// growing this array compiles and then silently breaks `parse`, which
     /// breaks `FileGrants`' round-trip. `the_classes_round_trip` guards it.
-    pub const ALL: [ShardClass; 5] =
-        [ShardClass::Read, ShardClass::Explore, ShardClass::Deploy, ShardClass::Session, ShardClass::Chain];
+    pub const ALL: [ShardClass; 6] = [
+        ShardClass::Read,
+        ShardClass::Explore,
+        ShardClass::Deploy,
+        ShardClass::Session,
+        ShardClass::Chain,
+        ShardClass::Stake,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             ShardClass::Read => "read",
@@ -157,6 +170,7 @@ impl ShardClass {
             ShardClass::Deploy => "deploy",
             ShardClass::Session => "session",
             ShardClass::Chain => "chain",
+            ShardClass::Stake => "stake",
         }
     }
     /// How the class reads in a consent prompt. Separate from [`Self::name`]
@@ -166,6 +180,7 @@ impl ShardClass {
     pub fn prompt_action(self) -> &'static str {
         match self {
             ShardClass::Chain => "read the chain",
+            ShardClass::Stake => "change your stake",
             other => other.name(),
         }
     }
@@ -180,6 +195,7 @@ impl ShardClass {
             "deploy" => ShardClass::Deploy,
             "session" => ShardClass::Session,
             "chain" => ShardClass::Chain,
+            "stake" => ShardClass::Stake,
             _ => return None,
         })
     }
@@ -647,7 +663,7 @@ mod tests {
         // `ALL`'s length is a literal: growing the enum without growing it
         // compiles and then silently stops `parse` from round-tripping, which
         // is how a remembered grant would vanish on restart.
-        assert_eq!(ShardClass::ALL.len(), 5);
+        assert_eq!(ShardClass::ALL.len(), 6);
         for c in ShardClass::ALL {
             assert_eq!(ShardClass::parse(c.name()), Some(c), "{} does not round-trip", c.name());
         }
@@ -686,6 +702,33 @@ mod tests {
         );
         b.allow_shard(7, ShardClass::Chain, None).unwrap();
         assert_eq!(b.check_shard(7, "chain"), Ok(ShardClass::Chain));
+    }
+
+    #[test]
+    fn the_stake_class_is_its_own_and_is_prompted() {
+        assert_eq!(ShardClass::of_verb("stake"), Some(ShardClass::Stake));
+        for v in ["lookup", "read", "watch", "explore", "deploy", "session", "chain", "nonsense"] {
+            assert_ne!(ShardClass::of_verb(v), Some(ShardClass::Stake), "{v} is not the stake class");
+        }
+        assert_eq!(ShardClass::Stake.prompt_action(), "change your stake");
+        assert_eq!(ShardClass::Stake.name(), "stake");
+
+        let mut b = Broker::new(MemGrants::default());
+        let site = Site::of_url("https://a.example/").unwrap();
+        let mut p = b.plan(&site, &knf("net!(1) | shard!(2)"));
+        b.answer(&mut p, SHARD, true, false).unwrap();
+        b.install(7, &p);
+        // Spending is never implied by a shard grant, not even for the payer's
+        // own stake.
+        assert!(
+            matches!(b.check_shard(7, "stake"), Err(Refusal::Ask(_))),
+            "a stake must be asked for, never granted with the shard"
+        );
+        // And a site that was granted chain reads still has to ask to stake.
+        b.allow_shard(7, ShardClass::Chain, None).unwrap();
+        assert!(matches!(b.check_shard(7, "stake"), Err(Refusal::Ask(_))));
+        b.allow_shard(7, ShardClass::Stake, Some(knf("shard!(3)").grant_hash())).unwrap();
+        assert_eq!(b.check_shard(7, "stake"), Ok(ShardClass::Stake));
     }
 
     #[test]

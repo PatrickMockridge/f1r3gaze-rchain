@@ -78,6 +78,12 @@ const KEY: &str = "04aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 /// As [`mock_rchain`], with `pos_error` making `/api/v1/pos` answer the 500 the
 /// node's own store failure produces.
 fn mock_rchain_with(value: Value, num: i64, finalized: bool, pos_error: bool) -> (String, Log) {
+    mock_rchain_full(value, num, finalized, pos_error, json!([]))
+}
+
+/// As [`mock_rchain_with`], with the `deployResult` a settled deploy carries —
+/// a write's answer lives there, not in the status tag.
+fn mock_rchain_full(value: Value, num: i64, finalized: bool, pos_error: bool, deploy_result: Value) -> (String, Log) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     let log: Log = Arc::default();
@@ -162,7 +168,7 @@ fn mock_rchain_with(value: Value, num: i64, finalized: bool, pos_error: bool) ->
             {
                 (200, json!({"expr": [value], "block": block}).to_string())
             } else if path.starts_with("/api/v1/deploy-status/") {
-                (200, json!({"ProcessedWithSuccess": {"deployResult": [], "block": block}}).to_string())
+                (200, json!({"ProcessedWithSuccess": {"deployResult": deploy_result.clone(), "block": block}}).to_string())
             } else if path.starts_with("/api/deploy") {
                 // Echo the signature the client signed, so the id must match.
                 let sig = serde_json::from_str::<Value>(&body)
@@ -606,18 +612,24 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
     assert!(br.pos_active_validators().is_err());
     assert!(br.pos_trusted().is_err());
     assert!(br.pos_delegations_native(KEY).is_err());
+    assert!(br.pos_bond(1).is_err());
+    assert!(br.pos_withdraw().is_err());
+    assert!(br.pos_settle("x").is_err());
     // The wallet's balance read was ungated before this change and would have
     // shipped a term naming `rho:rchain:revVault` to an f1r3fly node.
     assert!(br.rev_balance(KEY).is_err());
 
-    // The page verb answers the structured `unavailable`, synchronously.
+    // The page verbs answer the structured `unavailable`, synchronously.
     let mut svc = ShardService::new(Arc::clone(&br), "https://a.example:443", Arc::new(|| {}));
     let ret = Name::Unforgeable([9; 32]);
     for sub in ["block", "blocks", "find-deploy", "finalized", "pool", "caps", "shards", "pos", "bonds", "validators", "trusted"] {
         svc.request("rho:gaze:shard", &[Norm::str("chain"), Norm::str(sub), Norm::eval(ret.clone())]);
     }
+    for sub in ["bond", "withdraw"] {
+        svc.request("rho:gaze:shard", &[Norm::str("stake"), Norm::str(sub), Norm::int(1), Norm::eval(ret.clone())]);
+    }
     let outs = svc.drain();
-    assert_eq!(outs.len(), 11, "one reply per chain read");
+    assert_eq!(outs.len(), 13, "one reply per chain read and per stake action");
     for o in &outs {
         let ShardOut::Reply { datum, .. } = o else { panic!() };
         let t = datum.as_coll(CollKind::Tuple).unwrap();
@@ -633,8 +645,34 @@ fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
         }
     }
     for (_, body) in log.iter() {
-        for t in ["getBonds", "getActiveValidators", "getTrusted", "getDelegations", "revVault", "rho:rchain:pos"] {
+        for t in ["getBonds", "getActiveValidators", "getTrusted", "getDelegations", "revVault", "rho:rchain:pos", "deployerId"] {
             assert!(!body.contains(t), "an f1r3fly node was sent a term naming {t}: {body}");
         }
     }
+}
+
+/// A write settles on its **result**, not its status: a refusal is a
+/// *successful* deploy, so the status tag alone cannot tell the two apart.
+#[test]
+fn a_pos_write_settles_on_its_result_not_its_status() {
+    // (true, Nil) -- the node filters the Nil, so this is a one-element tuple.
+    let ok = json!([{"ExprTuple": {"data": [{"ExprBool": {"data": true}}]}}]);
+    let (base, _) = mock_rchain_full(manifest(), 10, true, false, ok);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let d = br.pos_bond(1_000_000).unwrap();
+    assert_eq!(br.pos_settle(&d.id()).unwrap(), Ok(()), "a successful bond");
+
+    // (false, "reason") -- a refusal, on a deploy that otherwise succeeded.
+    let refused = json!([{"ExprTuple": {"data": [
+        {"ExprBool": {"data": false}},
+        {"ExprString": {"data": "User is not bonded"}}
+    ]}}]);
+    let (base2, _) = mock_rchain_full(manifest(), 10, true, false, refused);
+    let br2 = bridge_dialect(NodeDialect::Rchain, vec![base2.clone()], base2);
+    let d2 = br2.pos_withdraw().unwrap();
+    assert_eq!(
+        br2.pos_settle(&d2.id()).unwrap(),
+        Err("User is not bonded".to_string()),
+        "the node's own words reach the caller"
+    );
 }

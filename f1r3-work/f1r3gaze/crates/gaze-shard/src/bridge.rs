@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
 pub struct ShardConfig {
@@ -518,6 +518,56 @@ impl Bridge {
         let (rung, n, _) = self.graded(&|o, b| o.explore(&term, b).and_then(|(d, _, _)| pos::delegations_from(&d)))?;
         Ok((rung, n))
     }
+
+    // --- staking writes (rchain only) --------------------------------------
+    //
+    // Neither write names a key: the node derives the validator from the
+    // payer's `*deployerId`, so a caller can only ever stake or unstake its
+    // own REV. That is what bounds a page's reach (see the `stake` verb).
+
+    /// Self-bond `drops` at the validator the payer's key signs as.
+    pub fn pos_bond(&self, drops: i64) -> Result<SignedDeploy, String> {
+        self.rchain_only("staking writes")?;
+        let (key, _) = self.payer.payer()?;
+        let term = pos::bond_term(drops);
+        self.sign_and_deploy(&key, &term, pos::STAKE_PHLO_LIMIT)
+    }
+
+    /// Stage the unbond. Refused while the validator carries delegations.
+    pub fn pos_withdraw(&self) -> Result<SignedDeploy, String> {
+        self.rchain_only("staking writes")?;
+        let (key, _) = self.payer.payer()?;
+        let term = pos::withdraw_term();
+        self.sign_and_deploy(&key, &term, pos::STAKE_PHLO_LIMIT)
+    }
+
+    /// A deploy's outcome, including the value it produced.
+    pub fn deploy_outcome(&self, id: &str) -> Result<chain::DeployOutcome, String> {
+        self.validator().deploy_outcome(id)
+    }
+
+    /// Wait for a write to settle and report **what the chain said**: `Ok(())`
+    /// if the node did the thing, `Err(reason)` if it refused.
+    ///
+    /// The outer `Result` is the transport and the timeout; the inner one is
+    /// the chain's answer. They are kept apart because a refusal is *not* a
+    /// failure — the deploy succeeded and the program declined — and collapsing
+    /// them would make "the bond was refused" read like "the request broke".
+    pub fn pos_settle(&self, id: &str) -> Result<Result<(), String>, String> {
+        self.rchain_only("staking writes")?;
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(120) {
+            let o = self.deploy_outcome(id)?;
+            match o.state.as_str() {
+                "Pending" => std::thread::sleep(Duration::from_secs(3)),
+                "Failed" => {
+                    return Err(o.error.unwrap_or_else(|| "the deploy failed, with no reason given".into()));
+                }
+                _ => return Ok(pos::reply_from(&o.result)),
+            }
+        }
+        Err(format!("deploy {id} did not settle within 120 s"))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -785,6 +835,45 @@ impl ShardService {
                     };
                     reply(match r {
                         Ok(v) => v,
+                        Err(e) => err3("shard", &e),
+                    })
+                });
+            }
+            // Change the payer's own stake: `stake!("bond", AMOUNT, ret)` or
+            // `stake!("withdraw", ret)`. A page names an *amount*, never a key:
+            // the validator is the payer's, derived by the node from the
+            // `rho:rchain:deployerId` capability the term passes. So this can
+            // lock the payer's REV or stage an unbond, and nothing else — it
+            // cannot send funds anywhere or touch another key.
+            "stake" => {
+                if self.bridge.cfg.dialect != NodeDialect::Rchain {
+                    return self.now(reply(err3(
+                        "unavailable",
+                        "the staking writes are the rchain dialect's; f1r3fly has no such route",
+                    )));
+                }
+                let sub = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let amount = args.get(2).and_then(|v| v.as_int());
+                self.job(move |b| {
+                    let d = match sub.as_str() {
+                        "bond" => match amount {
+                            Some(a) => b.pos_bond(a),
+                            None => return reply(err3("type", "stake bond wants an amount")),
+                        },
+                        "withdraw" => b.pos_withdraw(),
+                        other => return reply(err3("type", &format!("unknown stake action {other}"))),
+                    };
+                    let d = match d {
+                        Ok(d) => d,
+                        Err(e) => return reply(err3("shard", &e)),
+                    };
+                    let id = d.id();
+                    reply(match b.pos_settle(&id) {
+                        Ok(Ok(())) => ok3("node", Norm::map(vec![(Norm::str("deploy"), Norm::str(&id))])),
+                        // A refusal is the *chain's answer*, not a failure --
+                        // the deploy succeeded and the program declined -- so it
+                        // gets its own code and a page can tell them apart.
+                        Ok(Err(reason)) => err3("refused", &reason),
                         Err(e) => err3("shard", &e),
                     })
                 });

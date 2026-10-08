@@ -90,14 +90,17 @@ pub(super) fn deploy(n: &Node, d: &SignedDeploy) -> Result<String, String> {
     Ok(msg)
 }
 
-/// `GET /api/v1/deploy-status/{sig}` → a tagged enum, projected onto the
-/// `(state, latest block)` shape the bridge polls.
+/// `GET /api/v1/deploy-status/{sig}` → a tagged enum, read in full.
 ///
 /// `{"ProcessedWithSuccess": {…, "block": {…}}}` → `Finalized`,
 /// `{"ProcessedWithError": {…}}` → `Failed`, and every `NotProcessed` (an
-/// unknown or still-pooled signature, answered 200) → `Pending`. The bridge
-/// polls until the state is not `Pending`.
-pub(super) fn finalization(n: &Node, sig_hex: &str) -> Result<(String, Option<String>), String> {
+/// unknown or still-pooled signature, answered 200) → `Pending`.
+///
+/// This keeps the **result** as well as the status. A write's answer is the
+/// value the term sent to its own `rho:rchain:deployId` — a `rho:rchain:pos`
+/// refusal arrives there, on a deploy that otherwise succeeded — so a client
+/// that reads only the tag reports success for an action the node refused.
+pub(super) fn deploy_outcome(n: &Node, sig_hex: &str) -> Result<chain::DeployOutcome, String> {
     let v = n.call("GET", &format!("/api/v1/deploy-status/{sig_hex}"), None)?;
     let (tag, inner) = v
         .as_object()
@@ -108,8 +111,18 @@ pub(super) fn finalization(n: &Node, sig_hex: &str) -> Result<(String, Option<St
         "ProcessedWithError" => "Failed",
         _ => "Pending",
     };
-    let hash = inner.get("block").and_then(|b| b.get("blockHash")).and_then(|h| h.as_str()).map(str::to_string);
-    Ok((state.to_string(), hash))
+    Ok(chain::DeployOutcome {
+        state: state.to_string(),
+        block: inner.get("block").and_then(|b| b.get("blockHash")).and_then(|h| h.as_str()).map(str::to_string),
+        result: inner.get("deployResult").and_then(|r| r.as_array()).cloned().unwrap_or_default(),
+        error: inner.get("deployError").and_then(|e| e.as_str()).map(str::to_string),
+    })
+}
+
+/// The `(state, latest block)` projection the bridge polls, from the same read.
+pub(super) fn finalization(n: &Node, sig_hex: &str) -> Result<(String, Option<String>), String> {
+    let o = deploy_outcome(n, sig_hex)?;
+    Ok((o.state, o.block))
 }
 
 /// The `{expr, block}` envelope shared by the data-at-name and exploratory

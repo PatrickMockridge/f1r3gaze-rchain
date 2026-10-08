@@ -14,6 +14,7 @@
 use crate::expr::{json_to_norm, key_field};
 use k1ndl1ng_norm::Norm;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// The most blocks a page may ask for in one `blocks` read.
 pub const PAGE_MAX_DEPTH: i32 = 20;
@@ -131,6 +132,25 @@ pub struct NodeCapabilities {
     pub admin_http: bool,
     pub dev_mode: bool,
     pub faucet: bool,
+}
+
+/// A deploy's outcome, as the node reports it.
+///
+/// Distinct from the bridge's `(state, block)` projection, because a **write's
+/// answer is a value, not a status**: `rho:rchain:pos` replies
+/// `(Bool, Nil | String)` on the deploy's own id channel, and a refusal arrives
+/// there while the deploy itself succeeds. Reading the status alone reports
+/// success for a bond the node refused, so the answer has to come with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeployOutcome {
+    /// `Finalized`, `Failed` or `Pending`.
+    pub state: String,
+    pub block: Option<String>,
+    /// What the term sent to its `rho:rchain:deployId`.
+    pub result: Vec<Value>,
+    /// `ProcessedWithError`'s text — a deploy that *failed*, as opposed to a
+    /// deploy that succeeded and whose program refused.
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

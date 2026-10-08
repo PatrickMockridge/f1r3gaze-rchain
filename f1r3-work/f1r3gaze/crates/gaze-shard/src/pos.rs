@@ -25,8 +25,21 @@
 //!    arrives as a 3-element tuple when nothing is staged and a 4-element one
 //!    when it is. [`delegations_from`] accepts both and normalises the absent
 //!    deadline to `Norm::nil`.
+//!
+//! The **writes** are here too — [`bond_term`] and [`withdraw_term`] — and they
+//! differ from the reads in the two ways that matter:
+//!
+//! - They bind `rho:rchain:deployerId` and `rho:rchain:deployId` and reply on
+//!   the latter, because a *deploy's* result is read from its own deploy id
+//!   channel, not from the term's first `new`-bound name. A write that replied
+//!   on its first private name would report nothing, hiding the node's refusal.
+//! - Their reply is `(Bool, Nil | String)`, and **a refusal is a successful
+//!   deploy**. It is not a deploy error; it is the value the term sent. So the
+//!   caller must read the result back — [`reply_from`] is that parse — and the
+//!   reason it yields is the same `Nil`-filtered tuple the reads contend with.
 
 use crate::expr::{key_field, to_norm};
+use crate::wallet::{DEPLOYER_ID, DEPLOY_ID};
 use k1ndl1ng_norm::Norm;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,6 +47,11 @@ use serde_json::Value;
 /// The native PoS contract, and the registry that resolves it.
 pub const POS: &str = "rho:rchain:pos";
 pub const REGISTRY: &str = "rho:registry:lookup";
+
+/// The phlo a staking write is allowed to spend. The writes run a native
+/// process and a handful of rholang steps; this is the reference client's
+/// limit for the same operations.
+pub const STAKE_PHLO_LIMIT: i64 = 500_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +128,69 @@ pub fn trusted_term() -> String {
 
 pub fn delegations_term(key_hex: &str) -> String {
     pos_call(&format!("@PoS!(\"getDelegations\", \"{key_hex}\".hexToBytes(), *retCh)"))
+}
+
+// --- writes ---------------------------------------------------------------
+//
+// A write binds the payer's `deployerId` and the deploy's own `deployId`, and
+// forwards the `(Bool, Nil | String)` reply to the latter. The validator is
+// derived by the node from `*deployerId`, so neither term names a key: a
+// caller cannot bond or withdraw for anyone but itself.
+
+fn pos_write(call: &str) -> String {
+    format!(
+        "new retCh, PoSCh, rl(`{REGISTRY}`), deployerId(`{DEPLOYER_ID}`), deployId(`{DEPLOY_ID}`) in {{\n  \
+         rl!(`{POS}`, *PoSCh) |\n  \
+         for (@(_, PoS) <- PoSCh) {{\n    \
+         {call} |\n    \
+         for (@result <- retCh) {{ deployId!(result) }}\n  \
+         }}\n}}"
+    )
+}
+
+/// Self-bond `amount` at the validator this deploy's key signs as. Refused for
+/// an unbonded-and-untrusted key, and for an amount outside the shard's bounds.
+pub fn bond_term(amount: i64) -> String {
+    pos_write(&format!("@PoS!(\"bond\", *deployerId, {amount}, *retCh)"))
+}
+
+/// Stage the unbond. The validator stays bonded and earning until the next
+/// epoch boundary, then the claim is escrowed for the quarantine before it
+/// pays. Refused while the validator carries outstanding delegations.
+pub fn withdraw_term() -> String {
+    pos_write("@PoS!(\"withdraw\", *deployerId, *retCh)")
+}
+
+/// The `(Bool, Nil | String)` reply a write produces: `Ok(())` when the node
+/// did the thing, `Err(reason)` when it refused.
+///
+/// The success tuple is `(true, Nil)` on the wire, and the node's conversion
+/// **filters a `Nil` element out** — so a success arrives as a *one*-element
+/// tuple and a refusal as a two-element one. Both are accepted, as is a bare
+/// boolean, in case a future revision unwraps a one-tuple.
+pub fn reply_from(values: &[Value]) -> Result<(), String> {
+    let first = values.first().ok_or("the pos write answered nothing")?;
+    let (ok, reason) = match first.pointer("/ExprTuple/data").and_then(|d| d.as_array()) {
+        Some(t) => (
+            t.first()
+                .and_then(|v| v.pointer("/ExprBool/data"))
+                .and_then(|d| d.as_bool())
+                .ok_or("the pos write answered no boolean")?,
+            t.get(1).and_then(|v| v.pointer("/ExprString/data")).and_then(|d| d.as_str()).map(str::to_string),
+        ),
+        None => (
+            first
+                .pointer("/ExprBool/data")
+                .and_then(|d| d.as_bool())
+                .ok_or("the pos write answered no result")?,
+            None,
+        ),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(reason.unwrap_or_else(|| "refused, with no reason given".into()))
+    }
 }
 
 fn hex_key(k: &str) -> Norm {
@@ -293,5 +374,43 @@ mod tests {
         assert_eq!(ta[3].as_int(), Some(500));
         assert!(tb[3].is_nil(), "an absent deadline is nil");
         assert_eq!(tb[1].as_int(), Some(10));
+    }
+
+    #[test]
+    fn the_write_terms_bind_the_capability_and_reply_on_the_deploy_id() {
+        for t in [bond_term(1_000_000), withdraw_term()] {
+            assert!(t.starts_with("new retCh,"), "{t}");
+            assert!(t.contains("rho:rchain:pos"), "{t}");
+            assert!(t.contains("deployerId(`rho:rchain:deployerId`)"), "{t}");
+            assert!(t.contains("deployId(`rho:rchain:deployId`)"), "{t}");
+            // The reply goes to the deploy's own id channel -- a write that
+            // replied on its first private name would report nothing.
+            assert!(t.contains("deployId!(result)"), "{t}");
+            assert!(!t.contains("return!"), "{t}");
+        }
+        assert!(bond_term(1_000_000).contains("bond\", *deployerId, 1000000,"));
+        assert!(withdraw_term().contains("withdraw\", *deployerId,"));
+        // A write names no key: the node derives the validator from the
+        // capability, so a caller can only ever act for itself.
+        assert!(!bond_term(1).contains(".hexToBytes()"), "a bond names no key");
+    }
+
+    #[test]
+    fn both_write_reply_arities_parse() {
+        // (true, Nil) -- the Nil is filtered by the node, leaving one element.
+        let ok = vec![json!({"ExprTuple": {"data": [{"ExprBool": {"data": true}}]}})];
+        assert_eq!(reply_from(&ok), Ok(()));
+        // (false, "reason") -- two elements, and the reason is the whole point.
+        let refused = vec![json!({"ExprTuple": {"data": [
+            {"ExprBool": {"data": false}},
+            {"ExprString": {"data": "Public key is already bonded."}}
+        ]}})];
+        assert_eq!(reply_from(&refused), Err("Public key is already bonded.".to_string()));
+        // A bare boolean, in case a one-tuple is ever unwrapped.
+        assert_eq!(reply_from(&[json!({"ExprBool": {"data": true}})]), Ok(()));
+        assert!(reply_from(&[json!({"ExprBool": {"data": false}})]).is_err());
+        // Anything else is not an answer.
+        assert!(reply_from(&[]).is_err());
+        assert!(reply_from(&[json!({"ExprString": {"data": "?"}})]).is_err());
     }
 }

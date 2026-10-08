@@ -15,8 +15,11 @@
 //!                | pool | caps | shards        [--json]
 //! f1r3gaze pos status | delegations KEY | bonds | validators | trusted
 //!                                              [--json]
-//!                                    read the chain and its staking state
-//!                                    (the rchain dialect only)
+//! f1r3gaze pos bond AMOUNT | unbond
+//!                                    read the chain and its staking state, and
+//!                                    change the payer's own stake (the rchain
+//!                                    dialect only; bond is permissioned, so an
+//!                                    unadmitted key is refused)
 //! f1r3gaze --version
 //! ```
 
@@ -168,6 +171,31 @@ fn pos(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
         "bonds" => println!("{}", k1ndl1ng_norm::show(&b.pos_bonds()?.1)),
         "validators" => println!("{}", k1ndl1ng_norm::show(&b.pos_active_validators()?.1)),
         "trusted" => println!("{}", k1ndl1ng_norm::show(&b.pos_trusted()?.1)),
+        // Writes. `bond` is permissioned: a key that is not in the shard's
+        // trusted set is refused until a stakeholder admits it, and the node's
+        // own words are what gets printed.
+        "bond" => {
+            let amount: i64 = a
+                .get(1)
+                .copied()
+                .ok_or("pos bond needs an amount, in drops")?
+                .parse()
+                .map_err(|_| "the amount must be a whole number of drops")?;
+            let d = b.pos_bond(amount)?;
+            println!("deploy {}", d.id());
+            match b.pos_settle(&d.id())? {
+                Ok(()) => println!("bonded {amount} drops"),
+                Err(reason) => println!("refused: {reason}"),
+            }
+        }
+        "unbond" => {
+            let d = b.pos_withdraw()?;
+            println!("deploy {}", d.id());
+            match b.pos_settle(&d.id())? {
+                Ok(()) => println!("withdrawal staged: it pays after the quarantine at the next boundary"),
+                Err(reason) => println!("refused: {reason}"),
+            }
+        }
         other => return Err(format!("unknown pos read {other}")),
     }
     Ok(())

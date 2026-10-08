@@ -300,6 +300,27 @@ impl Node {
         }
     }
 
+    /// A deploy's outcome **including the value it produced** — which is where
+    /// a write's answer lives.
+    ///
+    /// f1r3fly's route carries only a state and a block, so its result is empty;
+    /// it is `rchain_only` for the staking writes anyway, and this keeps the
+    /// dialect from pretending otherwise.
+    pub fn deploy_outcome(&self, sig_hex: &str) -> Result<chain::DeployOutcome, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::deploy_outcome(self, sig_hex),
+            NodeDialect::F1r3fly => {
+                let (state, block) = self.finalization(sig_hex)?;
+                Ok(chain::DeployOutcome {
+                    state,
+                    block,
+                    result: Vec::new(),
+                    error: None,
+                })
+            }
+        }
+    }
+
     /// The event stream's URL, when the node has one. rchain has no websocket,
     /// so a caller that gets `None` polls instead.
     pub fn events_url(&self) -> Option<String> {

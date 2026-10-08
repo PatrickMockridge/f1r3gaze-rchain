@@ -202,3 +202,32 @@ fn the_rchain_reads_answer_a_live_node() {
     let (_, dn) = b.pos_delegations_native(&me).expect("native delegations");
     eprintln!("native delegations: {}", k1ndl1ng_norm::show(&dn));
 }
+
+/// The staking write, proven **without mutating** the dev chain.
+///
+/// A refusal is the strongest assertion available here, not a consolation: the
+/// reason only arrives if the deploy was accepted, the node ran the contract,
+/// the result was read back from `rho:rchain:deployId`, and the `(Bool, ...)`
+/// reply was parsed. A successful bond would prove the same path and *change
+/// validator state mid-suite* — the payer here is the bonded validator — so the
+/// refusal is the one to take.
+///
+/// `withdraw` is not probed live for the mirror reason: it would either stage a
+/// real unbond on the bonded validator, or run from a fresh key whose vault is
+/// empty, in which case the deploy dies at pre-charge and never reaches the
+/// contract at all. Its path is covered offline
+/// (`a_pos_write_settles_on_its_result_not_its_status`).
+#[test]
+fn the_rchain_staking_write_reports_the_nodes_refusal() {
+    let Some((base, key)) = base_and_key() else {
+        eprintln!("RCHAIN_NODE unset; skipping the live staking-write test");
+        return;
+    };
+    let b = bridge(&base, key);
+    let d = b.pos_bond(1_000_000).expect("the deploy is accepted");
+    eprintln!("bond deploy {}", d.id());
+    let answer = b.pos_settle(&d.id()).expect("the deploy settles");
+    eprintln!("bond as the bonded validator -> {answer:?}");
+    let reason = answer.expect_err("an already-bonded key cannot bond again");
+    assert!(reason.contains("already bonded"), "unexpected refusal: {reason}");
+}
