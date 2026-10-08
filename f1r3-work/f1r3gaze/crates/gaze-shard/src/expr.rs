@@ -53,9 +53,69 @@ pub fn to_norm(v: &Value) -> Norm {
     }
 }
 
+/// Plain JSON (not a `RhoExpr` envelope) as ground normal forms — the node's
+/// ordinary camelCase DTOs, which the chain and staking reads return.
+///
+/// Deliberately dumb about types: a hex-looking string stays a `str`, because
+/// `sig`, `blockHash`, `preStateHash`, `deployer`, `deployId` and even a
+/// deploy's `term` are all strings that merely look like bytes. Where a field
+/// is *known* to be a byte array, the caller (see [`crate::chain`],
+/// [`crate::pos`]) decodes it to `Norm::bytes` itself.
+///
+/// A number that does not fit `i64` — only `DeployInfo.cost` is a `u64` — and
+/// any float become strings rather than being truncated.
+pub fn json_to_norm(v: &Value) -> Norm {
+    match v {
+        Value::Null => Norm::nil(),
+        Value::Bool(b) => Norm::bool(*b),
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => Norm::int(i),
+            None => Norm::str(&n.to_string()),
+        },
+        Value::String(s) => Norm::str(s),
+        Value::Array(a) => Norm::list(a.iter().map(json_to_norm).collect()),
+        Value::Object(m) => Norm::map(m.iter().map(|(k, v)| (Norm::str(k), json_to_norm(v))).collect()),
+    }
+}
+
+/// A 65-byte validator (or deployer) key, decoded to bytes. Falls back to the
+/// raw string when the field is not a 65-byte hex key, so a node that changes
+/// its spelling does not lose the value.
+pub fn key_field(hex: &str) -> Norm {
+    match gaze_net::unhex(hex) {
+        Some(b) if b.len() == 65 => Norm::bytes(&b),
+        _ => Norm::str(hex),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_json_converts() {
+        let v: Value = serde_json::from_str(
+            r#"{"blockHash":"ab","blockNumber":7,"final":false,"missing":null,
+                "bonds":[{"validator":"04","stake":3}],"big":18446744073709551615}"#,
+        )
+        .unwrap();
+        let n = json_to_norm(&v);
+        assert_eq!(n.map_get("blockHash").and_then(|x| x.as_str()), Some("ab"));
+        assert_eq!(n.map_get("blockNumber").and_then(|x| x.as_int()), Some(7));
+        assert_eq!(n.map_get("final"), Some(&Norm::bool(false)));
+        assert!(n.map_get("missing").is_some_and(Norm::is_nil));
+        // Key order in JSON does not change the encoding: maps are canonical.
+        let reordered: Value = serde_json::from_str(
+            r#"{"big":18446744073709551615,"bonds":[{"validator":"04","stake":3}],"missing":null,
+                "final":false,"blockNumber":7,"blockHash":"ab"}"#,
+        )
+        .unwrap();
+        assert_eq!(json_to_norm(&reordered).encode(), n.encode());
+        // A 65-byte key that looks like hex is still a string here, not bytes.
+        assert_eq!(n.map_get("bonds").and_then(|b| b.as_coll(k1ndl1ng_norm::CollKind::List)).and_then(|l| l.first()).and_then(|e| e.map_get("validator")).and_then(|x| x.as_str()), Some("04"));
+        // A u64 beyond i64::MAX degrades to a string rather than truncating.
+        assert_eq!(n.map_get("big").and_then(|x| x.as_str()), Some("18446744073709551615"));
+    }
 
     #[test]
     fn manifests_convert() {

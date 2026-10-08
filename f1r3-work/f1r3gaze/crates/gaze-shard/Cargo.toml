@@ -20,6 +20,7 @@ k1ndl1ng-norm.workspace = true
 k1ndl1ng-parse.workspace = true
 k256 = { version = "0.13", features = ["ecdsa"] }
 getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 keyring = { version = "3", optional = true, features = ["apple-native", "windows-native"] }

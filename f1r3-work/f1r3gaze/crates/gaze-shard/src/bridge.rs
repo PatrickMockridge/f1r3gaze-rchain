@@ -1,9 +1,11 @@
 //! The bridge: shared state ([`Bridge`]) and one [`ShardService`] per tab.
 
+use crate::chain::{self, Blocks};
 use crate::deploy::{DeployData, SignedDeploy, public_key, sign_for};
 use crate::expr::to_norm;
 use crate::keys::fresh_key;
 use crate::node::{Node, NodeDialect};
+use crate::pos;
 use crate::site::{SiteAddr, SiteManifest};
 use crate::term::render;
 use gaze_blob::{BlobSource, Blobs};
@@ -232,15 +234,19 @@ impl Bridge {
 
     /// Ask every observer the same question at the same finalized block and
     /// grade the answer: one observer is `node`; `quorum` needs `k` identical
-    /// canonical encodings from distinct observers.
-    fn graded(
+    /// answers from distinct observers.
+    ///
+    /// Generic in the answer so identifier-addressed reads can be graded on
+    /// their parsed type. For `Norm` this is unchanged behaviour: `Norm`'s own
+    /// `PartialEq` *is* the encoding comparison, plus an `Arc` fast path.
+    fn graded<T: Clone + PartialEq>(
         &self,
-        ask: &dyn Fn(&Node, &str) -> Result<Norm, String>,
-    ) -> Result<(Rung, Norm, i64), String> {
+        ask: &dyn Fn(&Node, &str) -> Result<T, String>,
+    ) -> Result<(Rung, T, i64), String> {
         let obs = self.observers();
         let first = obs.first().ok_or("no observers configured")?;
         let (block, num) = first.last_finalized()?;
-        let mut answers: Vec<Norm> = Vec::new();
+        let mut answers: Vec<T> = Vec::new();
         let mut errors = Vec::new();
         for o in &obs {
             match ask(o, &block) {
@@ -254,9 +260,9 @@ impl Bridge {
         if obs.len() == 1 {
             return Ok((Rung::Node, a0, num));
         }
-        let mut best: Option<(usize, Norm)> = None;
+        let mut best: Option<(usize, T)> = None;
         for a in &answers {
-            let n = answers.iter().filter(|b| b.encode() == a.encode()).count();
+            let n = answers.iter().filter(|b| *b == a).count();
             if best.as_ref().is_none_or(|(m, _)| n > *m) {
                 best = Some((n, a.clone()));
             }
@@ -267,6 +273,21 @@ impl Bridge {
         } else {
             Err(format!("observers disagree at block {block} ({n} of {} agree)", obs.len()))
         }
+    }
+
+    /// One observer for a read that is *not* gradeable — a head-relative or
+    /// node-local answer, where two observers legitimately differ.
+    fn reader(&self) -> Result<Node, String> {
+        self.observers().into_iter().next().ok_or_else(|| "no observers configured".to_string())
+    }
+
+    /// The guard for the rchain-only surface. It reads the dialect, so nothing
+    /// is sent before it passes.
+    fn rchain_only(&self, what: &str) -> Result<(), String> {
+        if self.cfg.dialect != NodeDialect::Rchain {
+            return Err(format!("the {what} are the rchain dialect's; f1r3fly has no such route"));
+        }
+        Ok(())
     }
 
     fn check_fresh(&self, binding: &str, num: i64) -> Result<(), String> {
@@ -366,6 +387,9 @@ impl Bridge {
     /// The REV balance of `addr`, read by an exploratory deploy of the native
     /// `revVault` `getBalance`, graded like every other read.
     pub fn rev_balance(&self, addr: &str) -> Result<(Rung, u64), String> {
+        // Without this, an f1r3fly bridge would ship a term naming
+        // `rho:rchain:revVault` to an f1r3fly node.
+        self.rchain_only("REV balance reads")?;
         let term = crate::wallet::balance_term(addr);
         let (rung, v, _) = self.graded(&|o, b| o.explore(&term, b).map(|(d, _, _)| collapse(&d)))?;
         Ok((rung, crate::wallet::parse_balance(&v)?))
@@ -386,6 +410,113 @@ impl Bridge {
     /// Fund `addr` from the node's devnet faucet: `(deploy id, drops)`.
     pub fn faucet(&self, addr: &str) -> Result<(String, i64), String> {
         self.validator().faucet(addr)
+    }
+
+    // --- chain reads (rchain only) -----------------------------------------
+    //
+    // Graded iff the answer is a function of an identifier the caller named, or
+    // is read at a block the grader pins. A head-relative or node-local answer
+    // is one observer's, honestly labelled `node` -- grading it would let two
+    // observers at different heads read as a disagreement.
+
+    /// A block and its deploys, by hash.
+    pub fn block(&self, hash: &str) -> Result<(Rung, chain::BlockInfo), String> {
+        self.rchain_only("chain reads")?;
+        let (rung, v, _) = self.graded(&|o, _| o.block(hash))?;
+        Ok((rung, v))
+    }
+
+    /// The block containing the deploy with this signature.
+    pub fn find_deploy(&self, id: &str) -> Result<(Rung, chain::LightBlockInfo), String> {
+        self.rchain_only("chain reads")?;
+        let (rung, v, _) = self.graded(&|o, _| o.find_deploy(id))?;
+        Ok((rung, v))
+    }
+
+    /// The newest blocks named by `spec`. Head-relative, so not graded; the
+    /// page-facing depth cap is applied by the caller.
+    pub fn blocks(&self, spec: Blocks) -> Result<(Rung, Vec<chain::LightBlockInfo>), String> {
+        self.rchain_only("chain reads")?;
+        Ok((Rung::Node, self.reader()?.blocks(spec, None)?))
+    }
+
+    /// Whether this node has finalized the block with this hash. **Not**
+    /// graded: finality is a local view, and a slower observer legitimately
+    /// answers `false` for a block another has already finalized.
+    pub fn is_finalized(&self, hash: &str) -> Result<(Rung, bool), String> {
+        self.rchain_only("chain reads")?;
+        Ok((Rung::Node, self.reader()?.is_finalized(hash)?))
+    }
+
+    /// The deploys this node has accepted and not yet included.
+    pub fn pool(&self) -> Result<(Rung, Vec<chain::PooledDeploy>), String> {
+        self.rchain_only("chain reads")?;
+        Ok((Rung::Node, self.reader()?.pool()?))
+    }
+
+    /// What this node will do.
+    pub fn capabilities(&self) -> Result<(Rung, chain::NodeCapabilities), String> {
+        self.rchain_only("chain reads")?;
+        Ok((Rung::Node, self.reader()?.capabilities()?))
+    }
+
+    /// The shards this node serves.
+    pub fn shards(&self) -> Result<(Rung, chain::Shards), String> {
+        self.rchain_only("chain reads")?;
+        Ok((Rung::Node, self.reader()?.shards()?))
+    }
+
+    // --- staking reads (rchain only) ---------------------------------------
+
+    /// The epoch, the active set and every staged withdrawal. Head-relative.
+    pub fn pos_status(&self) -> Result<(Rung, pos::PosStatus), String> {
+        self.rchain_only("staking reads")?;
+        Ok((Rung::Node, self.reader()?.pos_status()?))
+    }
+
+    /// One delegator's positions. The route takes no block, so it is answered
+    /// at one observer's head -- not gradeable.
+    pub fn pos_delegations(&self, key: &str) -> Result<(Rung, Vec<pos::DelegatorPosition>), String> {
+        self.rchain_only("staking reads")?;
+        Ok((Rung::Node, self.reader()?.pos_delegations(key)?))
+    }
+
+    // The native `pos` reads run as an exploratory deploy, so the grader pins
+    // one block for every observer and they *are* gradeable.
+
+    /// `getBonds` — every validator's stake, with delegations aggregated in.
+    pub fn pos_bonds(&self) -> Result<(Rung, Norm), String> {
+        self.rchain_only("staking reads")?;
+        let term = pos::bonds_term();
+        let (rung, n, _) = self.graded(&|o, b| o.explore(&term, b).and_then(|(d, _, _)| pos::bonds_from(&d)))?;
+        Ok((rung, n))
+    }
+
+    /// `getActiveValidators` — the set drawing blocks this epoch.
+    pub fn pos_active_validators(&self) -> Result<(Rung, Norm), String> {
+        self.rchain_only("staking reads")?;
+        let term = pos::active_validators_term();
+        let (rung, n, _) =
+            self.graded(&|o, b| o.explore(&term, b).and_then(|(d, _, _)| pos::keys_from(&d, "getActiveValidators")))?;
+        Ok((rung, n))
+    }
+
+    /// `getTrusted` — the keys a stakeholder has admitted to the pool.
+    pub fn pos_trusted(&self) -> Result<(Rung, Norm), String> {
+        self.rchain_only("staking reads")?;
+        let term = pos::trusted_term();
+        let (rung, n, _) = self.graded(&|o, b| o.explore(&term, b).and_then(|(d, _, _)| pos::keys_from(&d, "getTrusted")))?;
+        Ok((rung, n))
+    }
+
+    /// `getDelegations` — one delegator's positions, read in rholang rather
+    /// than over HTTP. Kept for parity; the HTTP route carries two more fields.
+    pub fn pos_delegations_native(&self, key: &str) -> Result<(Rung, Norm), String> {
+        self.rchain_only("staking reads")?;
+        pos::validate_key(key)?;
+        let term = pos::delegations_term(key);
+        let (rung, n, _) = self.graded(&|o, b| o.explore(&term, b).and_then(|(d, _, _)| pos::delegations_from(&d)))?;
+        Ok((rung, n))
     }
 }
 
@@ -608,6 +739,55 @@ impl ShardService {
                     ));
                 }
                 (self.wake)();
+            }
+            // The chain and staking reads, named by argument 1:
+            // `chain!("block", HASH, ret)`. One verb, not one per read:
+            // `deploy` is taken, the consent prompt is per-*class* anyway, and
+            // `read` already dispatches on its argument's shape.
+            "chain" => {
+                // The dialect guard is first, so an f1r3fly node never sees a
+                // request -- the same shape the `proof`/`replayed` rungs use.
+                if self.bridge.cfg.dialect != NodeDialect::Rchain {
+                    return self.now(reply(err3(
+                        "unavailable",
+                        "the chain and staking reads are the rchain dialect's; f1r3fly has no such route",
+                    )));
+                }
+                let sub = args.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let arg = args.get(2).and_then(|v| v.as_str()).map(str::to_string);
+                self.job(move |b| {
+                    let r: Result<Norm, String> = match (sub.as_str(), arg.as_deref()) {
+                        ("block", Some(h)) => b.block(h).map(|(r, v)| ok3(r.name(), chain::block_to_norm(&v))),
+                        ("blocks", _) => {
+                            let spec = match arg.as_deref().and_then(|a| a.parse::<i32>().ok()) {
+                                Some(n) => Blocks::Depth(n.clamp(1, chain::PAGE_MAX_DEPTH)),
+                                None => Blocks::Head,
+                            };
+                            b.blocks(spec).map(|(r, v)| ok3(r.name(), chain::blocks_to_norm(&v)))
+                        }
+                        ("find-deploy", Some(id)) => b.find_deploy(id).map(|(r, v)| ok3(r.name(), chain::light_to_norm(&v))),
+                        ("finalized", Some(h)) => b.is_finalized(h).map(|(r, v)| ok3(r.name(), Norm::bool(v))),
+                        ("pool", _) => b.pool().map(|(r, v)| ok3(r.name(), chain::pooled_to_norm(&v))),
+                        ("caps", _) => b.capabilities().map(|(r, v)| ok3(r.name(), chain::caps_to_norm(&v))),
+                        ("shards", _) => b.shards().map(|(r, v)| ok3(r.name(), chain::shards_to_norm(&v))),
+                        ("pos", _) => b.pos_status().map(|(r, v)| ok3(r.name(), pos::status_to_norm(&v))),
+                        ("delegations", Some(k)) => b.pos_delegations(k).map(|(r, v)| ok3(r.name(), pos::positions_to_norm(&v))),
+                        ("bonds", _) => b.pos_bonds().map(|(r, v)| ok3(r.name(), v)),
+                        ("validators", _) => b.pos_active_validators().map(|(r, v)| ok3(r.name(), v)),
+                        ("trusted", _) => b.pos_trusted().map(|(r, v)| ok3(r.name(), v)),
+                        ("bonds-delegations", Some(k)) => b.pos_delegations_native(k).map(|(r, v)| ok3(r.name(), v)),
+                        // A hash-addressed read with no hash is a shape error,
+                        // not a node error.
+                        ("block" | "find-deploy" | "finalized" | "delegations", None) => {
+                            return reply(err3("type", "this chain read wants a hash or a key"));
+                        }
+                        (other, _) => return reply(err3("type", &format!("unknown chain read {other}"))),
+                    };
+                    reply(match r {
+                        Ok(v) => v,
+                        Err(e) => err3("shard", &e),
+                    })
+                });
             }
             "proof" | "replayed" => self.now(reply(err3(
                 "unavailable",

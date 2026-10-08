@@ -134,16 +134,39 @@ pub enum ShardClass {
     Explore,
     Deploy,
     Session,
+    /// Enumerate the chain and its staking state — blocks, deploys, finality,
+    /// the mempool, the validator set and the delegation ledger.
+    ///
+    /// Deliberately *not* seeded with the shard grant (unlike `Read` and
+    /// `Explore`, which address the site's own published content): this reads
+    /// global state that is not the site's, so it is asked for once and
+    /// remembered only if allowed.
+    Chain,
 }
 
 impl ShardClass {
-    pub const ALL: [ShardClass; 4] = [ShardClass::Read, ShardClass::Explore, ShardClass::Deploy, ShardClass::Session];
+    /// Every class. **The length is a literal**, so growing the enum without
+    /// growing this array compiles and then silently breaks `parse`, which
+    /// breaks `FileGrants`' round-trip. `the_classes_round_trip` guards it.
+    pub const ALL: [ShardClass; 5] =
+        [ShardClass::Read, ShardClass::Explore, ShardClass::Deploy, ShardClass::Session, ShardClass::Chain];
     pub fn name(self) -> &'static str {
         match self {
             ShardClass::Read => "read",
             ShardClass::Explore => "explore",
             ShardClass::Deploy => "deploy",
             ShardClass::Session => "session",
+            ShardClass::Chain => "chain",
+        }
+    }
+    /// How the class reads in a consent prompt. Separate from [`Self::name`]
+    /// because `name` is also the persisted token in `grants.tsv`: the token
+    /// stays short while the prompt stays English ("wants to read the chain on
+    /// the shard"). Every other class prompts with its name, unchanged.
+    pub fn prompt_action(self) -> &'static str {
+        match self {
+            ShardClass::Chain => "read the chain",
+            other => other.name(),
         }
     }
     pub fn parse(s: &str) -> Option<ShardClass> {
@@ -156,6 +179,7 @@ impl ShardClass {
             "explore" => ShardClass::Explore,
             "deploy" => ShardClass::Deploy,
             "session" => ShardClass::Session,
+            "chain" => ShardClass::Chain,
             _ => return None,
         })
     }
@@ -474,7 +498,7 @@ impl<S: GrantStore> Broker<S> {
         if r.att.shard.contains(&class) {
             Ok(class)
         } else {
-            Err(Refusal::Ask(format!("{} wants to {} on the shard", r.site, class.name())))
+            Err(Refusal::Ask(format!("{} wants to {} on the shard", r.site, class.prompt_action())))
         }
     }
 
@@ -619,6 +643,52 @@ mod tests {
     }
 
     #[test]
+    fn the_classes_round_trip() {
+        // `ALL`'s length is a literal: growing the enum without growing it
+        // compiles and then silently stops `parse` from round-tripping, which
+        // is how a remembered grant would vanish on restart.
+        assert_eq!(ShardClass::ALL.len(), 5);
+        for c in ShardClass::ALL {
+            assert_eq!(ShardClass::parse(c.name()), Some(c), "{} does not round-trip", c.name());
+        }
+        assert_eq!(ShardClass::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn the_chain_verb_is_its_own_class() {
+        assert_eq!(ShardClass::of_verb("chain"), Some(ShardClass::Chain));
+        for v in ["lookup", "read", "watch", "explore", "deploy", "session", "proof", "replayed", "nonsense"] {
+            assert_ne!(ShardClass::of_verb(v), Some(ShardClass::Chain), "{v} is not the chain class");
+        }
+        // The prompt reads as English; the persisted token stays short.
+        assert_eq!(ShardClass::Chain.prompt_action(), "read the chain");
+        assert_eq!(ShardClass::Chain.name(), "chain");
+        for c in [ShardClass::Read, ShardClass::Explore, ShardClass::Deploy, ShardClass::Session] {
+            assert_eq!(c.prompt_action(), c.name(), "other classes prompt with their name, unchanged");
+        }
+    }
+
+    #[test]
+    fn the_chain_class_is_prompted_not_seeded() {
+        let mut b = Broker::new(MemGrants::default());
+        let site = Site::of_url("https://a.example/").unwrap();
+        let mut p = b.plan(&site, &knf("net!(1) | shard!(2)"));
+        b.answer(&mut p, SHARD, true, false).unwrap();
+        b.install(7, &p);
+        // Granting `shard` seeds the classes that address the site's own
+        // published content...
+        assert_eq!(b.check_shard(7, "lookup"), Ok(ShardClass::Read));
+        assert_eq!(b.check_shard(7, "explore"), Ok(ShardClass::Explore));
+        // ...but not chain reads, which are global state: those are asked for.
+        assert!(
+            matches!(b.check_shard(7, "chain"), Err(Refusal::Ask(_))),
+            "chain reads must not be granted by a plain shard grant"
+        );
+        b.allow_shard(7, ShardClass::Chain, None).unwrap();
+        assert_eq!(b.check_shard(7, "chain"), Ok(ShardClass::Chain));
+    }
+
+    #[test]
     fn file_store_round_trips() {
         let dir = std::env::temp_dir().join(format!("gaze-broker-{}", std::process::id()));
         let path = dir.join("grants.tsv");
@@ -630,10 +700,15 @@ mod tests {
             b.answer(&mut p, SHARD, true, true).unwrap();
             b.install(1, &p);
             b.allow_shard(1, ShardClass::Deploy, Some(k.grant_hash())).unwrap();
+            b.allow_shard(1, ShardClass::Chain, Some(k.grant_hash())).unwrap();
         }
         let b = Broker::new(FileGrants::new(&path));
         assert!(b.plan(&site, &k).granted(SHARD));
         assert!(b.remembered_all()[0].classes.contains(&ShardClass::Deploy));
+        assert!(
+            b.remembered_all()[0].classes.contains(&ShardClass::Chain),
+            "a remembered chain grant survives a restart"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

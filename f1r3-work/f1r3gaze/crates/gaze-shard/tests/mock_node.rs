@@ -69,6 +69,15 @@ fn mock(value: Value, num: i64) -> (String, Log) {
 /// the signature it received. `finalized` false models a fresh single-validator
 /// node, whose fringe is unavailable and which answers `/api/blocks` instead.
 fn mock_rchain(value: Value, num: i64, finalized: bool) -> (String, Log) {
+    mock_rchain_with(value, num, finalized, false)
+}
+
+/// 65 bytes as 130 lowercase hex chars.
+const KEY: &str = "04aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// As [`mock_rchain`], with `pos_error` making `/api/v1/pos` answer the 500 the
+/// node's own store failure produces.
+fn mock_rchain_with(value: Value, num: i64, finalized: bool, pos_error: bool) -> (String, Log) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", l.local_addr().unwrap());
     let log: Log = Arc::default();
@@ -94,7 +103,14 @@ fn mock_rchain(value: Value, num: i64, finalized: bool) -> (String, Log) {
             r.read_exact(&mut body).unwrap();
             let body = String::from_utf8(body).unwrap();
             log2.lock().unwrap().push((path.clone(), body.clone()));
-            let block = json!({"blockHash": "b1", "blockNumber": num});
+            // A full LightBlockInfo, since the chain reads deserialise it.
+            let block = json!({
+                "version": 1, "shardId": "/root", "blockHash": "b1", "blockNumber": num,
+                "sender": KEY, "seqNum": num, "preStateHash": "p", "postStateHash": "q",
+                "justifications": [], "bonds": [{"validator": KEY, "stake": 3}],
+                "sigAlgorithm": "secp256k1", "sig": "3045", "blockSize": "512",
+                "deployCount": 1, "rejectedDeploys": [], "timestamp": 99
+            });
             let (status, resp) = if path.starts_with("/api/last-finalized-block") {
                 if finalized {
                     (200, json!({"blockInfo": block}).to_string())
@@ -102,8 +118,40 @@ fn mock_rchain(value: Value, num: i64, finalized: bool) -> (String, Log) {
                     // A single-validator net never finalizes; the route 400s.
                     (400, json!("Finalized fringe is not available.").to_string())
                 }
+            } else if path.starts_with("/api/block/") {
+                // Before /api/blocks: "/api/block/x" does not start with the
+                // latter, but keeping the pair adjacent keeps it obvious.
+                (200, json!({"blockInfo": block, "deploys": [deploy_info(num)]}).to_string())
             } else if path.starts_with("/api/blocks") {
+                // Covers /api/blocks, /{depth} and /{start}/{end}.
                 (200, json!([block]).to_string())
+            } else if path.starts_with("/api/is-finalized/") {
+                (200, "false".to_string())
+            } else if path.starts_with("/api/deploy/") {
+                // find-deploy, and it MUST precede the /api/deploy arm below,
+                // which would otherwise read it as a submission.
+                (200, block.to_string())
+            } else if path.starts_with("/api/v1/deploys") {
+                (200, json!({"deploys": [{"deployId": "3044aa", "timestamp": 1, "deployer": KEY, "term": "Nil", "phloPrice": 1, "phloLimit": 100, "validAfterBlockNumber": 1}]}).to_string())
+            } else if path.starts_with("/api/v1/capabilities") {
+                (200, json!({"autopropose": true, "proposeOnDeploy": true, "manualPropose": false, "adminHttp": true, "devMode": true, "faucet": true}).to_string())
+            } else if path.starts_with("/api/shards") {
+                (200, json!({"primaryShard": "/root", "shardCount": 1, "shards": [{"shardId": "/root", "primary": true, "latestBlockNumber": num}]}).to_string())
+            } else if path.starts_with("/api/v1/pos/delegations") {
+                // Before /api/v1/pos. The node answers 400 for a malformed key,
+                // which is a true answer, not an empty list.
+                let k = path.split("delegator=").nth(1).unwrap_or("");
+                if k.len() != 130 || !k.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    (400, json!({"error": "delegator must be a hex-encoded 65-byte public key"}).to_string())
+                } else {
+                    (200, json!([{"operator": KEY, "amount": 10, "accruedRewards": 2, "pendingUndelegation": {"deadline": 500, "blocksRemaining": 40}}]).to_string())
+                }
+            } else if path.starts_with("/api/v1/pos") {
+                if pos_error {
+                    (500, json!({"error": "pos store unavailable"}).to_string())
+                } else {
+                    (200, json!({"latestBlockNumber": num, "epochLength": 100, "quarantineLength": 10, "epoch": 0, "blocksUntilEpochBoundary": 5, "activeValidators": [KEY], "pendingWithdrawals": []}).to_string())
+                }
             } else if path.starts_with("/api/status") {
                 // The wallet reads the shard id here rather than guessing it.
                 (200, json!({"shardId": "/root", "latestBlockNumber": num, "minPhloPrice": 1}).to_string())
@@ -126,11 +174,21 @@ fn mock_rchain(value: Value, num: i64, finalized: bool) -> (String, Log) {
                 (200, json!({"message": "no route"}).to_string())
             };
             let mut s = s;
-            let reason = if status == 400 { "Bad Request" } else { "OK" };
+            let reason = match status {
+                400 => "Bad Request",
+                500 => "Internal Server Error",
+                _ => "OK",
+            };
             let _ = write!(s, "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{resp}", resp.len());
         }
     });
     (base, log)
+}
+
+/// The deploy metadata a block carries.
+fn deploy_info(_num: i64) -> Value {
+    json!({"deployer": KEY, "term": "Nil", "timestamp": 1, "sig": "3044aa", "sigAlgorithm": "secp256k1",
+           "phloPrice": 1, "phloLimit": 100, "validAfterBlockNumber": 1, "cost": 42, "errored": false, "systemDeployError": ""})
 }
 
 fn manifest() -> Value {
@@ -435,4 +493,148 @@ fn the_rchain_wallet_reads_and_moves_rev() {
     let (f, _) = mock(manifest(), 10);
     let fb = bridge_dialect(NodeDialect::F1r3fly, vec![f.clone()], f);
     assert!(fb.rev_transfer(TO, 1000).unwrap_err().contains("Embers"));
+    // The balance read was ungated before this change.
+    assert!(fb.rev_balance(TO).unwrap_err().contains("rchain"), "a balance read must not reach f1r3fly");
+}
+
+// --- the rchain read surface ------------------------------------------------
+
+/// The chain reads: identifier-addressed ones grade, head-relative ones are one
+/// observer's and say so.
+#[test]
+fn the_rchain_chain_reads_answer_and_grade() {
+    let (a, _) = mock_rchain(manifest(), 10, true);
+    let (b, _) = mock_rchain(manifest(), 10, true);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![a.clone(), b], a.clone());
+
+    // A hash-addressed read: every observer must agree.
+    let (rung, bi) = br.block("b1").unwrap();
+    assert_eq!(rung, Rung::Quorum);
+    assert_eq!(bi.block_info.block_number, 10);
+    assert_eq!(bi.deploys.len(), 1);
+    assert_eq!(bi.deploys[0].cost, 42);
+    assert_eq!(br.find_deploy("3044aa").unwrap().1.block_hash, "b1");
+
+    // Head-relative and node-local reads are one observer's.
+    let (rung, bs) = br.blocks(gaze_shard::chain::Blocks::Head).unwrap();
+    assert_eq!(rung, Rung::Node);
+    assert_eq!(bs.len(), 1);
+    assert!(!br.is_finalized("b1").unwrap().1, "a single-validator net finalizes nothing");
+    assert!(br.capabilities().unwrap().1.faucet);
+    assert_eq!(br.shards().unwrap().1.primary_shard, "/root");
+    assert_eq!(br.pool().unwrap().1.len(), 1);
+}
+
+/// A transposed depth/range route would still return plausible content, so the
+/// only assertion that catches it is on the path actually requested.
+#[test]
+fn the_block_reads_address_the_right_routes() {
+    use gaze_shard::chain::Blocks;
+    let (base, log) = mock_rchain(manifest(), 10, true);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    br.blocks(Blocks::Head).unwrap();
+    br.blocks(Blocks::Depth(3)).unwrap();
+    br.blocks(Blocks::Range(2, 5)).unwrap();
+    let paths: Vec<String> = log.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+    assert!(paths.iter().any(|p| p == "/api/blocks"), "head: {paths:?}");
+    assert!(paths.iter().any(|p| p == "/api/blocks/3"), "depth: {paths:?}");
+    assert!(paths.iter().any(|p| p == "/api/blocks/2/5"), "range: {paths:?}");
+}
+
+#[test]
+fn the_rchain_staking_reads_answer() {
+    let (base, _) = mock_rchain(manifest(), 10, true);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let (rung, s) = br.pos_status().unwrap();
+    assert_eq!(rung, Rung::Node);
+    assert_eq!(s.epoch_length, 100);
+    assert_eq!(s.active_validators.len(), 1);
+    let (_, ps) = br.pos_delegations(KEY).unwrap();
+    assert_eq!(ps.len(), 1);
+    assert_eq!(ps[0].amount, 10);
+    assert_eq!(ps[0].accrued_rewards, 2);
+    assert_eq!(ps[0].pending_undelegation.as_ref().map(|u| u.blocks_remaining), Some(40));
+}
+
+/// A node-side failure and a malformed key both reach the caller.
+#[test]
+fn a_pos_failure_and_a_bad_key_are_surfaced() {
+    let (base, _) = mock_rchain_with(manifest(), 10, true, true);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let e = br.pos_status().unwrap_err();
+    assert!(e.contains("pos store unavailable"), "{e}");
+    // A malformed key is refused locally -- an empty list is a *true* answer
+    // about a delegator with no positions, so it must not be reached by error.
+    assert!(br.pos_delegations("04aa").unwrap_err().contains("65 bytes"));
+    assert!(br.pos_delegations("zz").unwrap_err().contains("hex"));
+    assert!(br.pos_delegations_native("04aa").unwrap_err().contains("65 bytes"));
+}
+
+/// The native `getBonds` reply's keys are byte arrays, not hex strings.
+#[test]
+fn the_native_bonds_read_decodes_its_keys() {
+    let (base, _) = mock_rchain(json!({"ExprMap": {"data": {KEY: {"ExprInt": {"data": 7}}}}}), 10, true);
+    let br = bridge_dialect(NodeDialect::Rchain, vec![base.clone()], base);
+    let (_, bonds) = br.pos_bonds().unwrap();
+    let pair = bonds.as_coll(CollKind::Map).unwrap();
+    let len = pair[0].as_lit().and_then(|l| match l {
+        k1ndl1ng_norm::Lit::Bytes(b) => Some(b.len()),
+        _ => None,
+    });
+    assert_eq!(len, Some(65), "a bonds key is 65 bytes, not 130 chars of hex");
+    assert_eq!(pair[1].as_int(), Some(7));
+}
+
+/// **The guard for the whole design.** An f1r3fly bridge must answer every
+/// rchain-only read without the node ever seeing an rchain route or term.
+#[test]
+fn no_rchain_route_or_term_reaches_an_f1r3fly_node() {
+    use gaze_shard::chain::Blocks;
+    let (base, vlog) = mock(manifest(), 10);
+    let br = bridge_dialect(NodeDialect::F1r3fly, vec![base.clone()], base);
+
+    assert!(br.block("b1").is_err());
+    assert!(br.blocks(Blocks::Head).is_err());
+    assert!(br.find_deploy("3044aa").is_err());
+    assert!(br.is_finalized("b1").is_err());
+    assert!(br.pool().is_err());
+    assert!(br.capabilities().is_err());
+    assert!(br.shards().is_err());
+    assert!(br.pos_status().is_err());
+    assert!(br.pos_delegations(KEY).is_err());
+    assert!(br.pos_bonds().is_err());
+    assert!(br.pos_active_validators().is_err());
+    assert!(br.pos_trusted().is_err());
+    assert!(br.pos_delegations_native(KEY).is_err());
+    // The wallet's balance read was ungated before this change and would have
+    // shipped a term naming `rho:rchain:revVault` to an f1r3fly node.
+    assert!(br.rev_balance(KEY).is_err());
+
+    // The page verb answers the structured `unavailable`, synchronously.
+    let mut svc = ShardService::new(Arc::clone(&br), "https://a.example:443", Arc::new(|| {}));
+    let ret = Name::Unforgeable([9; 32]);
+    for sub in ["block", "blocks", "find-deploy", "finalized", "pool", "caps", "shards", "pos", "bonds", "validators", "trusted"] {
+        svc.request("rho:gaze:shard", &[Norm::str("chain"), Norm::str(sub), Norm::eval(ret.clone())]);
+    }
+    let outs = svc.drain();
+    assert_eq!(outs.len(), 11, "one reply per chain read");
+    for o in &outs {
+        let ShardOut::Reply { datum, .. } = o else { panic!() };
+        let t = datum.as_coll(CollKind::Tuple).unwrap();
+        assert_eq!(t[0].as_str(), Some("err"));
+        assert_eq!(t[1].as_str(), Some("unavailable"), "{datum:?}");
+    }
+
+    // And nothing rchain-shaped reached the wire.
+    let log = vlog.lock().unwrap();
+    for (path, _) in log.iter() {
+        for p in ["/api/block", "/api/blocks", "/api/v1/pos", "/api/shards", "/api/v1/deploys", "/api/v1/capabilities"] {
+            assert!(!path.starts_with(p), "an f1r3fly node was sent {path}");
+        }
+    }
+    for (_, body) in log.iter() {
+        for t in ["getBonds", "getActiveValidators", "getTrusted", "getDelegations", "revVault", "rho:rchain:pos"] {
+            assert!(!body.contains(t), "an f1r3fly node was sent a term naming {t}: {body}");
+        }
+    }
 }

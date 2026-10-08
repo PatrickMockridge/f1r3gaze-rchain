@@ -13,10 +13,12 @@
 #![forbid(unsafe_code)]
 
 pub mod bridge;
+pub mod chain;
 pub mod deploy;
 pub mod expr;
 pub mod keys;
 pub mod node;
+pub mod pos;
 pub mod site;
 pub mod term;
 pub mod wallet;

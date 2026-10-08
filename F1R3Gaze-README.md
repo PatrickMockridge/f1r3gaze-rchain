@@ -23,6 +23,12 @@ f1r3gaze --headless URL [--allow] [--click SELECTOR]... [--timeout SECS] [--wait
 f1r3gaze --profile DIR ...          use DIR as the profile (also: F1R3GAZE_PROFILE)
 f1r3gaze wallet new|import|export|use|list|balance|send|remove ...
                                     the wallets that pay for deploys (docs/wallet.md)
+f1r3gaze chain block HASH | blocks [N] | find-deploy ID | finalized HASH
+               | pool | caps | shards     [--json]
+f1r3gaze pos status | delegations KEY | bonds | validators | trusted
+                                             [--json]
+                                    read the chain and its staking state
+                                    (the rchain dialect only)
 
 f1r3c compile app.rho [-o app.knf] [--level k1g] [--import IDENT=URN]...
 f1r3c inspect app.knf               manifest, hashes, program text
@@ -183,7 +189,8 @@ Three defects in the existing code were found and fixed on the way:
 
 ## Tests
 
-67 tests in this workspace, all passing (CampF1R3 carries its own 181):
+94 tests in this workspace, all passing — three of them env-gated live tests
+against a running `rnode` (CampF1R3 carries its own 181):
 
 | crate | tests | what they establish |
 | --- | --- | --- |
@@ -277,6 +284,8 @@ node:
 | wallet balance | Embers `state` | `revVault!("getBalance", addr, *ret)` through an exploratory deploy |
 | wallet transfer | an Embers prepared contract | `revVault!("transfer", *deployerId, to, drops, *ret)`, as a deploy |
 | faucet | Embers | `POST /api/faucet {address}` |
+| chain reads | — (no counterpart) | `block` / `blocks` / `deploy` / `is-finalized` / `deploys` / `capabilities` / `shards` |
+| staking reads | — (no counterpart) | `/api/v1/pos`, `/api/v1/pos/delegations`, and the read-only `rho:rchain:pos` methods |
 
 Two things are lost on rchain, and are dialect-scoped rather than papered over:
 
@@ -293,6 +302,17 @@ A single-validator `rnode` proposes blocks but never finalizes, so
 `/api/last-finalized-block` answers 400; the rchain dialect falls back to the
 newest block from `/api/blocks` as its anchor. On a net that does finalize, the
 fringe is used.
+
+The chain and staking reads are the mirror image of the two losses above: they
+are **rchain-only**. f1r3fly has no counterpart for them, so `f1r3gaze chain`
+and `f1r3gaze pos` refuse there and a page's `chain!` verb answers
+`("err","unavailable",…)`. Nothing rchain-shaped is ever put on the wire — the
+f1r3fly arms are written so they do not call the HTTP layer at all, and a test
+asserts the node's request log stays clean.
+
+A page reaches the reads through one `chain!` verb, `chain!("block", HASH, ret)`
+and so on, which is its own consent class ("wants to read the chain"), asked for
+once per site and never granted with the shard itself.
 
 Proven live: `crates/gaze-shard/tests/rchain_live.rs` deploys a program this
 crate signs against a running `rnode` and checks the node's reported deploy id

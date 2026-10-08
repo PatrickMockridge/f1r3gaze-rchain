@@ -7,8 +7,11 @@
 //! unforgeable name must be wrapped in the `ExprUnforg` envelope, and deploy
 //! status is a tagged enum.
 
-use super::Node;
+use super::{Node, enc};
+use crate::chain::{self, Blocks};
 use crate::deploy::SignedDeploy;
+use crate::pos;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 /// `(block hash, block number)` to anchor reads and deploys.
@@ -116,4 +119,56 @@ fn project_block(v: &Value) -> (Vec<Value>, String, i64) {
     let h = v.pointer("/block/blockHash").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let n = v.pointer("/block/blockNumber").and_then(|x| x.as_i64()).unwrap_or(0);
     (data, h, n)
+}
+
+/// One typed GET, with the route named in the error so a shape change on the
+/// node reads as `"block: missing field \`blockHash\`"` rather than a panic.
+fn get<T: DeserializeOwned>(n: &Node, path: &str, what: &str) -> Result<T, String> {
+    let v = n.call("GET", path, None)?;
+    serde_json::from_value(v).map_err(|e| format!("{what}: {e}"))
+}
+
+// --- chain reads -----------------------------------------------------------
+// Every caller-supplied path operand goes through `enc`, which escapes `/` --
+// which matters, because a block hash may be spelled `blake2b-256:<hex>`.
+
+pub(super) fn block(n: &Node, hash: &str) -> Result<chain::BlockInfo, String> {
+    get(n, &format!("/api/block/{}", enc(hash)), "block")
+}
+
+/// The newest `spec` blocks. `cap` clamps a page-facing depth; the CLI passes
+/// `None` and gets what it asked for.
+pub(super) fn blocks(n: &Node, spec: Blocks, cap: Option<i32>) -> Result<Vec<chain::LightBlockInfo>, String> {
+    get(n, &spec.path(cap), "blocks")
+}
+
+pub(super) fn find_deploy(n: &Node, id: &str) -> Result<chain::LightBlockInfo, String> {
+    get(n, &format!("/api/deploy/{}", enc(id)), "find-deploy")
+}
+
+pub(super) fn is_finalized(n: &Node, hash: &str) -> Result<bool, String> {
+    get(n, &format!("/api/is-finalized/{}", enc(hash)), "is-finalized")
+}
+
+pub(super) fn pool(n: &Node) -> Result<Vec<chain::PooledDeploy>, String> {
+    let p: chain::PooledDeploys = get(n, "/api/v1/deploys", "pooled deploys")?;
+    Ok(p.deploys)
+}
+
+pub(super) fn capabilities(n: &Node) -> Result<chain::NodeCapabilities, String> {
+    get(n, "/api/v1/capabilities", "capabilities")
+}
+
+pub(super) fn shards(n: &Node) -> Result<chain::Shards, String> {
+    get(n, "/api/shards", "shards")
+}
+
+// --- staking reads ---------------------------------------------------------
+
+pub(super) fn pos_status(n: &Node) -> Result<pos::PosStatus, String> {
+    get(n, "/api/v1/pos", "pos status")
+}
+
+pub(super) fn pos_delegations(n: &Node, key: &str) -> Result<Vec<pos::DelegatorPosition>, String> {
+    get(n, &format!("/api/v1/pos/delegations?delegator={}", enc(key)), "delegations")
 }

@@ -11,6 +11,12 @@
 //!                 |use ADDRESS|remove ADDRESS|balance [ADDRESS]
 //!                 |send TO AMOUNT [DESCRIPTION]|faucet [ADDRESS]
 //!                                    manage the wallets that pay for deploys
+//! f1r3gaze chain block HASH | blocks [N] | find-deploy ID | finalized HASH
+//!                | pool | caps | shards        [--json]
+//! f1r3gaze pos status | delegations KEY | bonds | validators | trusted
+//!                                              [--json]
+//!                                    read the chain and its staking state
+//!                                    (the rchain dialect only)
 //! f1r3gaze --version
 //! ```
 
@@ -22,6 +28,149 @@ fn usage() -> ! {
         "usage: f1r3gaze [--profile DIR] [URL]\n       f1r3gaze [--profile DIR] --headless URL [--allow] [--click SELECTOR]... [--timeout SECS] [--log FILE]"
     );
     std::process::exit(2)
+}
+
+fn shortn(s: &str) -> String {
+    gaze_shard::bridge::short(s)
+}
+
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    }
+}
+
+fn print_json(v: serde_json::Value) -> Result<(), String> {
+    println!("{}", serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Split off a trailing `--json`, and refuse on any dialect but rchain before
+/// a request is made.
+fn read_args<'a>(eng: &gaze_shell::Engine, args: &'a [String], what: &str) -> Result<(Vec<&'a str>, bool), String> {
+    if eng.bridge.cfg.dialect != gaze_shard::NodeDialect::Rchain {
+        return Err(format!("the {what} are the rchain dialect's; f1r3fly has no such route"));
+    }
+    let json = args.iter().any(|a| a == "--json");
+    Ok((args.iter().map(String::as_str).filter(|x| *x != "--json").collect(), json))
+}
+
+fn chain(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
+    use gaze_shard::chain::Blocks;
+    let (a, json) = read_args(eng, args, "chain reads")?;
+    let b = &eng.bridge;
+    let need = |i: usize, of: &str| a.get(i).copied().ok_or_else(|| format!("chain {} needs {of}", a.first().copied().unwrap_or("")));
+    match a.first().copied().unwrap_or("caps") {
+        "block" => {
+            let bi = b.block(need(1, "a block hash")?)?.1;
+            if json {
+                return print_json(serde_json::to_value(&bi).map_err(|e| e.to_string())?);
+            }
+            let i = &bi.block_info;
+            println!("{} #{}  {} deploys  sender {}  {}", shortn(&i.block_hash), i.block_number, i.deploy_count, shortn(&i.sender), i.timestamp);
+            for d in &bi.deploys {
+                println!("  {}  {}  {}{}", shortn(&d.sig), shortn(&d.deployer), if d.errored { "ERROR " } else { "" }, clip(&d.term, 60));
+            }
+        }
+        "blocks" => {
+            let spec = match a.get(1) {
+                Some(n) => Blocks::Depth(n.parse::<i32>().map_err(|_| "chain blocks wants a depth")?),
+                None => Blocks::Head,
+            };
+            let bs = b.blocks(spec)?.1;
+            if json {
+                return print_json(serde_json::to_value(&bs).map_err(|e| e.to_string())?);
+            }
+            for i in &bs {
+                println!("{} #{}  {} deploys  {}", shortn(&i.block_hash), i.block_number, i.deploy_count, i.timestamp);
+            }
+        }
+        "find-deploy" => {
+            let i = b.find_deploy(need(1, "a deploy id")?)?.1;
+            if json {
+                return print_json(serde_json::to_value(&i).map_err(|e| e.to_string())?);
+            }
+            println!("{} #{}", shortn(&i.block_hash), i.block_number);
+        }
+        "finalized" => println!("{}", b.is_finalized(need(1, "a block hash")?)?.1),
+        "pool" => {
+            let ps = b.pool()?.1;
+            if json {
+                return print_json(serde_json::to_value(&ps).map_err(|e| e.to_string())?);
+            }
+            for p in &ps {
+                println!("{}  {}  {}  {}", shortn(&p.deploy_id), shortn(&p.deployer), p.phlo_limit, clip(&p.term, 60));
+            }
+        }
+        "caps" => {
+            let c = b.capabilities()?.1;
+            if json {
+                return print_json(serde_json::to_value(&c).map_err(|e| e.to_string())?);
+            }
+            println!(
+                "autopropose      {}\nproposeOnDeploy  {}\nmanualPropose    {}\nadminHttp        {}\ndevMode          {}\nfaucet           {}",
+                c.autopropose, c.propose_on_deploy, c.manual_propose, c.admin_http, c.dev_mode, c.faucet
+            );
+        }
+        "shards" => {
+            let s = b.shards()?.1;
+            if json {
+                return print_json(serde_json::to_value(&s).map_err(|e| e.to_string())?);
+            }
+            println!("primary {}", s.primary_shard);
+            for x in &s.shards {
+                println!("{}  {}  #{}", x.shard_id, if x.primary { "primary" } else { "member" }, x.latest_block_number);
+            }
+        }
+        other => return Err(format!("unknown chain read {other}")),
+    }
+    Ok(())
+}
+
+fn pos(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
+    let (a, json) = read_args(eng, args, "staking reads")?;
+    let b = &eng.bridge;
+    match a.first().copied().unwrap_or("status") {
+        "status" => {
+            let s = b.pos_status()?.1;
+            if json {
+                return print_json(serde_json::to_value(&s).map_err(|e| e.to_string())?);
+            }
+            println!(
+                "epoch {}  length {}  quarantine {}  {} blocks to the boundary  head #{}",
+                s.epoch, s.epoch_length, s.quarantine_length, s.blocks_until_epoch_boundary, s.latest_block_number
+            );
+            println!("active validators: {}", s.active_validators.len());
+            for w in &s.pending_withdrawals {
+                println!("  withdrawal {}  deadline {}  in {}", shortn(&w.validator), w.deadline, w.blocks_remaining);
+            }
+        }
+        "delegations" => {
+            let k = a.get(1).copied().ok_or("pos delegations needs a validator key")?;
+            let ps = b.pos_delegations(k)?.1;
+            if json {
+                return print_json(serde_json::to_value(&ps).map_err(|e| e.to_string())?);
+            }
+            if ps.is_empty() {
+                println!("no positions");
+            }
+            for p in &ps {
+                let staged = match &p.pending_undelegation {
+                    Some(u) => format!("deadline {} in {}", u.deadline, u.blocks_remaining),
+                    None => "none".into(),
+                };
+                println!("{}  amount {}  accrued {}  staged: {staged}", shortn(&p.operator), p.amount, p.accrued_rewards);
+            }
+        }
+        // The native reads reply a term, so they are shown as one.
+        "bonds" => println!("{}", k1ndl1ng_norm::show(&b.pos_bonds()?.1)),
+        "validators" => println!("{}", k1ndl1ng_norm::show(&b.pos_active_validators()?.1)),
+        "trusted" => println!("{}", k1ndl1ng_norm::show(&b.pos_trusted()?.1)),
+        other => return Err(format!("unknown pos read {other}")),
+    }
+    Ok(())
 }
 
 fn wallet(eng: &gaze_shell::Engine, args: &[String]) -> Result<(), String> {
@@ -126,10 +275,16 @@ fn main() {
             "--timeout" => opts.timeout = Duration::from_secs(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
             "--log" => log = Some(args.next().unwrap_or_else(|| usage())),
             "--wait" => opts.wait = Duration::from_secs(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())),
-            "wallet" => {
+            "wallet" | "chain" | "pos" => {
+                let which = a.clone();
                 let rest: Vec<String> = args.by_ref().collect();
                 let eng = Engine::new(dir.clone());
-                if let Err(e) = wallet(&eng, &rest) {
+                let r = match which.as_str() {
+                    "chain" => chain(&eng, &rest),
+                    "pos" => pos(&eng, &rest),
+                    _ => wallet(&eng, &rest),
+                };
+                if let Err(e) = r {
                     eprintln!("f1r3gaze: {e}");
                     std::process::exit(1);
                 }

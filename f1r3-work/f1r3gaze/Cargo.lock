@@ -1221,6 +1221,7 @@ dependencies = [
  "k1ndl1ng-parse",
  "k256",
  "keyring",
+ "serde",
  "serde_json",
  "tungstenite",
 ]
@@ -1247,6 +1248,7 @@ dependencies = [
  "getrandom 0.2.17",
  "k1ndl1ng-norm",
  "keyboard-types 0.7.0",
+ "serde_json",
  "url",
 ]
 

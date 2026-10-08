@@ -10,9 +10,17 @@
 mod f1r3fly;
 mod rchain;
 
+use crate::chain::{self, Blocks};
 use crate::deploy::SignedDeploy;
+use crate::pos;
 use gaze_net::{Http, HttpRequest};
 use serde_json::Value;
+
+/// The one refusal the f1r3fly dialect gives the chain and staking reads. It is
+/// produced *without touching the wire* — the f1r3fly arm never calls
+/// [`Node::call`] — so an rchain-only route cannot physically reach an f1r3fly
+/// node, however the caller behaves.
+const NO_RCHAIN_READS: &str = "the chain and staking reads are the rchain dialect's; f1r3fly has no such route";
 
 /// Which node the bridge speaks to.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -158,6 +166,87 @@ impl Node {
         let v = self.call("POST", "/api/faucet", Some(&serde_json::json!({ "address": address })))?;
         let id = v.get("deployId").and_then(|s| s.as_str()).ok_or("no deployId in the faucet response")?.to_string();
         Ok((id, v.get("amount").and_then(|a| a.as_i64()).unwrap_or(0)))
+    }
+
+    // --- chain reads: the rchain dialect only ------------------------------
+    // Each f1r3fly arm is a constant, produced without a request. `f1r3fly.rs`
+    // does not change at all for any of these.
+
+    /// A block and its deploys, by hash.
+    pub fn block(&self, hash: &str) -> Result<chain::BlockInfo, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::block(self, hash),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    /// The newest blocks named by `spec`. `cap` clamps a page-facing depth.
+    pub fn blocks(&self, spec: Blocks, cap: Option<i32>) -> Result<Vec<chain::LightBlockInfo>, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::blocks(self, spec, cap),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    /// The block containing the deploy with this signature.
+    pub fn find_deploy(&self, id: &str) -> Result<chain::LightBlockInfo, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::find_deploy(self, id),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    /// Whether the node has finalized the block with this hash.
+    pub fn is_finalized(&self, hash: &str) -> Result<bool, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::is_finalized(self, hash),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    /// The deploys this node has accepted and not yet included.
+    pub fn pool(&self) -> Result<Vec<chain::PooledDeploy>, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::pool(self),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    /// What this node will do — autopropose, the faucet, the admin surface.
+    pub fn capabilities(&self) -> Result<chain::NodeCapabilities, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::capabilities(self),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    /// The shards this node serves, with the primary.
+    pub fn shards(&self) -> Result<chain::Shards, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::shards(self),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    // --- staking reads: the rchain dialect only ----------------------------
+
+    /// The epoch, its length, the active set and every staged withdrawal.
+    pub fn pos_status(&self) -> Result<pos::PosStatus, String> {
+        match self.dialect {
+            NodeDialect::Rchain => rchain::pos_status(self),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
+    }
+
+    /// One delegator's positions across the operators it has staked with. The
+    /// key is 65-byte hex; a malformed one is a 400 at the node, so it is
+    /// validated before sending.
+    pub fn pos_delegations(&self, key: &str) -> Result<Vec<pos::DelegatorPosition>, String> {
+        pos::validate_key(key)?;
+        match self.dialect {
+            NodeDialect::Rchain => rchain::pos_delegations(self, key),
+            NodeDialect::F1r3fly => Err(NO_RCHAIN_READS.into()),
+        }
     }
 
     /// Registry entry at `uri`, at `block` (default: last finalized):

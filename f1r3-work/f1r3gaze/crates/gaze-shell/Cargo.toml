@@ -33,5 +33,6 @@ gaze-shard.workspace = true
 gaze-wallet.workspace = true
 k1ndl1ng-norm.workspace = true
 getrandom = "0.2"
+serde_json = "1"
 url = "2"
 keyboard-types = "0.7"

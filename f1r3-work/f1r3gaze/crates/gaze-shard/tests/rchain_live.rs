@@ -155,3 +155,50 @@ fn the_rchain_wallet_reads_and_moves_rev() {
     eprintln!("faucet deploy {id} funded {drops} drops");
     assert!(drops > 0, "the faucet answers a positive drip");
 }
+
+/// The chain and staking reads against a live node.
+#[test]
+fn the_rchain_reads_answer_a_live_node() {
+    use gaze_shard::chain::Blocks;
+    let Some((base, key)) = base_and_key() else {
+        eprintln!("RCHAIN_NODE unset; skipping the live rchain reads test");
+        return;
+    };
+    let b = bridge(&base, key.clone());
+    let node = Node::new(&base, NodeDialect::Rchain, Http::new());
+
+    let (anchor, num) = node.last_finalized().expect("an anchor");
+    let (_, bi) = b.block(&anchor).expect("block");
+    assert_eq!(bi.block_info.block_number, num, "the block read returns the anchor");
+    let (_, bs) = b.blocks(Blocks::Depth(5)).expect("blocks");
+    assert!(!bs.is_empty());
+    assert!(bs[0].block_number <= num + 1, "the newest block is at or just past the anchor");
+
+    // Finality is a *local view*, and a single-validator net finalizes nothing,
+    // so assert only that the read answers -- never what it says.
+    assert!(b.is_finalized(&anchor).is_ok());
+
+    let (_, caps) = b.capabilities().expect("capabilities");
+    eprintln!("capabilities: faucet={} adminHttp={} devMode={}", caps.faucet, caps.admin_http, caps.dev_mode);
+    let (_, s) = b.shards().expect("shards");
+    assert_eq!(s.primary_shard, "/root");
+    assert!(b.pool().is_ok(), "the mempool read answers, empty or not");
+
+    let (_, ps) = b.pos_status().expect("pos status");
+    eprintln!("pos: epoch {} length {} quarantine {}", ps.epoch, ps.epoch_length, ps.quarantine_length);
+    assert!(ps.epoch_length >= 1, "epoch length {}", ps.epoch_length);
+
+    // The native reads run under an exploratory deploy.
+    let (_, bonds) = b.pos_bonds().expect("bonds");
+    assert!(bonds.as_coll(k1ndl1ng_norm::CollKind::Map).is_some(), "getBonds answers a map");
+    assert!(b.pos_active_validators().is_ok());
+    assert!(b.pos_trusted().is_ok());
+
+    // A delegator with no positions answers an empty list, which is a true
+    // answer -- so assert the call, not the count.
+    let me = gaze_net::hex(&public_key(&key));
+    let (_, d) = b.pos_delegations(&me).expect("delegations");
+    eprintln!("delegations for {me}: {}", d.len());
+    let (_, dn) = b.pos_delegations_native(&me).expect("native delegations");
+    eprintln!("native delegations: {}", k1ndl1ng_norm::show(&dn));
+}
