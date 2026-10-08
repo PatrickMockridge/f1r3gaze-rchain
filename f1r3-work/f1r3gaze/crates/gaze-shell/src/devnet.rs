@@ -32,9 +32,14 @@ pub const DEV_STAKE: &str = "1000000";
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Ocapn {
     None,
-    /// The transport `@endo/ocapn` speaks, and the one the branch's interop run is recorded over.
+    /// OCapN's own test transport: `@endo/ocapn`'s `tcp-testing` netlayer speaks it, it is
+    /// **unauthenticated by design**, and it is what the branch's ERTP round trip uses (the
+    /// websocket and noise transports authenticate; this one does not).
+    TcpTesting,
+    /// The transport `@endo/ocapn` speaks and authenticates with — the one the branch's fixture
+    /// interop run is recorded over.
     Websocket,
-    /// The transport a *remote* peer should use — its handshake is verified against Agoric's own.
+    /// The transport a *remote* peer should use; its handshake is verified against Agoric's own.
     Noise,
 }
 
@@ -42,6 +47,7 @@ impl Ocapn {
     pub fn parse(s: &str) -> Option<Ocapn> {
         match s {
             "none" => Some(Ocapn::None),
+            "tcp-testing" | "tcp" => Some(Ocapn::TcpTesting),
             "websocket" | "ws" => Some(Ocapn::Websocket),
             "noise" => Some(Ocapn::Noise),
             _ => None,
@@ -50,8 +56,19 @@ impl Ocapn {
     fn name(self) -> &'static str {
         match self {
             Ocapn::None => "none",
+            Ocapn::TcpTesting => "tcp-testing",
             Ocapn::Websocket => "websocket",
             Ocapn::Noise => "noise",
+        }
+    }
+    /// The `api-server` key that binds this transport. Each is off until it names an address, and
+    /// they are independent — a node may listen on any subset.
+    fn key(self) -> Option<&'static str> {
+        match self {
+            Ocapn::None => None,
+            Ocapn::TcpTesting => Some("ocapn-listen"),
+            Ocapn::Websocket => Some("ocapn-listen-websocket"),
+            Ocapn::Noise => Some("ocapn-listen-noise"),
         }
     }
 }
@@ -137,10 +154,8 @@ fn config(opts: &Options) -> String {
         // The gateway's transaction route is gated on this as well as on having a gateway.
         c.push_str("  enable-txn-api = true\n");
     }
-    match opts.ocapn {
-        Ocapn::None => {}
-        Ocapn::Websocket => c.push_str(&format!("  ocapn-listen-websocket = \"127.0.0.1:{ocapn}\"\n")),
-        Ocapn::Noise => c.push_str(&format!("  ocapn-listen-noise = \"127.0.0.1:{ocapn}\"\n")),
+    if let Some(key) = opts.ocapn.key() {
+        c.push_str(&format!("  {key} = \"127.0.0.1:{ocapn}\"\n"));
     }
     c.push_str("}\n\n");
     c.push_str(&format!(

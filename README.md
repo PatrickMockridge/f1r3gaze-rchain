@@ -369,6 +369,14 @@ alone the node bonds a *random* key set of its own, refuses to propose, and look
 misconfigured. A `genesis/wallets.txt` you write before `up` is kept, which is how a second funded
 account is added.
 
+`--ocapn none|tcp-testing|websocket|noise` binds an **OCapN** listener for a foreign peer, which needs an
+rnode built from the `ocapn-ertp` branch — the same branch that installs **ERTP** at genesis, reachable
+on chain as `rho:rchain:ertp`. **ERTP is reached by a peer and not by this CLI**: the object API answers
+with capabilities, and a capability that arrives as an opaque reference is nothing a command line can
+use, so there is no ERTP verb here on purpose. What is verified from this fork is the transport —
+Agoric's own `@endo/ocapn` completes a CapTP round trip against the devnet's websocket listener, a
+foreign implementation reaching a chain node.
+
 Proven live: `crates/gaze-shard/tests/rchain_live.rs` deploys a program this
 crate signs against a running `rnode` and checks the node's reported deploy id
 against the signature, then reads a REV balance, moves REV, and funds from the

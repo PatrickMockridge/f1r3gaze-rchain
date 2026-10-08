@@ -37,10 +37,13 @@
 //!                                    the files go on-chain, in the layout this
 //!                                    client's own reader fetches from
 //! f1r3gaze devnet up|status|down [--shards N] [--rnode PATH] [--data DIR]
-//!                [--ocapn none|websocket|noise] [--port-base N] [--fresh|--purge]
-//!                                    start a local rnode: one node, `--shards 2`
-//!                                    makes it a gateway that coordinates a
-//!                                    cross-shard transaction itself
+//!                [--ocapn none|tcp-testing|websocket|noise] [--port-base N]
+//!                [--fresh|--purge]
+//!                                    start a local rnode: `--shards 2` makes it a
+//!                                    gateway that coordinates a cross-shard
+//!                                    transaction itself, and `--ocapn` binds an
+//!                                    OCapN listener for a foreign peer (needs an
+//!                                    rnode built from the ocapn-ertp branch)
 //! f1r3gaze --version
 //! ```
 
@@ -340,7 +343,8 @@ fn devnet(args: &[String]) -> Result<(), String> {
             }
             "--ocapn" => {
                 i += 1;
-                ocapn = Ocapn::parse(rest.get(i).ok_or("--ocapn needs a mode")?).ok_or("--ocapn is none, websocket or noise")?;
+                ocapn = Ocapn::parse(rest.get(i).ok_or("--ocapn needs a mode")?)
+                    .ok_or("--ocapn is none, tcp-testing, websocket or noise")?;
             }
             "--port-base" => {
                 i += 1;
